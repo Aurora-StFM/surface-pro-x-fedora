@@ -1,0 +1,14 @@
+# Build output and working trees (see OUT_DIR / WORK_DIR in config.env)
+out/
+work/
+*.rpm
+*.raw
+*.raw.xz
+*.img
+# Local signing key material
+signing/
+*.gpg
+*.asc
+# Windows info exports and diagnostics (may contain device details)
+SurfaceProX-windows-info-*.zip
+surface-pro-x-diag-*.tar.gz

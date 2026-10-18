@@ -1,0 +1,12 @@
+# Keep the SLIMbus controller out of runtime suspend. Its suspend path tears
+# down the BAM DMA channels; that teardown has not been verified on the
+# Surface Pro X and an earlier (wrong stream ID) attempt locked the machine.
+ACTION=="add", SUBSYSTEM=="platform", KERNEL=="qcom,slim-ngd*", ATTR{power/control}="on"
+
+# Keep the WSA881x speaker amplifiers out of runtime suspend. After suspend
+# they sometimes fail to re-attach to the SoundWire bus, runtime resume then
+# fails with -EINVAL and every playback attempt errors out until a reboot.
+ACTION=="add", SUBSYSTEM=="soundwire", KERNEL=="sdw:*:0217:2110:*", ATTR{power/control}="on"
+
+# The codec's SoundWire link: its clock stop detaches both amplifiers.
+ACTION=="add", SUBSYSTEM=="platform", KERNEL=="wcd934x-soundwire*", ATTR{power/control}="on"

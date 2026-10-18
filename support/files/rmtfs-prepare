@@ -1,0 +1,8 @@
+#!/usr/bin/bash
+# Create the zero-filled EFS images rmtfs serves to the modem, if missing.
+set -e
+dir=/var/lib/rmtfs
+mkdir -p "$dir"
+for f in modem_fs1 modem_fs2 modem_fsc modem_fsg modem_tuning; do
+    [ -s "$dir/$f" ] || truncate -s 2M "$dir/$f"
+done

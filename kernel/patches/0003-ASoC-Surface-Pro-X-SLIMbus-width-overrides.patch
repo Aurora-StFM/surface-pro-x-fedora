@@ -1,0 +1,64 @@
+diff --git a/sound/soc/codecs/wcd934x.c b/sound/soc/codecs/wcd934x.c
+index 3c22f7149..8cc0328b2 100644
+--- a/sound/soc/codecs/wcd934x.c
++++ b/sound/soc/codecs/wcd934x.c
+@@ -1769,6 +1769,15 @@ static int wcd934x_slim_set_hw_params(struct wcd934x_codec *wcd,
+ 	return ret;
+ }
+ 
++/*
++ * Surface Pro X bring-up: force the SLIMbus playback channel width (data
++ * length announced to the ADSP framer). 0 = use the stream format.
++ * Takes effect on the next stream start.
++ */
++static int spx_rx_bps;
++module_param(spx_rx_bps, int, 0644);
++MODULE_PARM_DESC(spx_rx_bps, "Force SLIMbus RX channel width in bits (0 = auto, 16, 20, 24)");
++
+ static int wcd934x_hw_params(struct snd_pcm_substream *substream,
+ 			     struct snd_pcm_hw_params *params,
+ 			     struct snd_soc_dai *dai)
+@@ -1795,6 +1804,11 @@ static int wcd934x_hw_params(struct snd_pcm_substream *substream,
+ 				params_width(params));
+ 			return -EINVAL;
+ 		}
++		if (spx_rx_bps) {
++			dev_info(wcd->dev, "spx-dbg: RX channel width forced %u -> %d bits\n",
++				 wcd->dai[dai->id].sconfig.bps, spx_rx_bps);
++			wcd->dai[dai->id].sconfig.bps = spx_rx_bps;
++		}
+ 		break;
+ 
+ 	case SNDRV_PCM_STREAM_CAPTURE:
+diff --git a/sound/soc/qcom/qdsp6/q6afe-dai.c b/sound/soc/qcom/qdsp6/q6afe-dai.c
+index 0f47aadaa..c2d998ffb 100644
+--- a/sound/soc/qcom/qdsp6/q6afe-dai.c
++++ b/sound/soc/qcom/qdsp6/q6afe-dai.c
+@@ -34,6 +34,14 @@ struct q6afe_dai_data {
+ 	struct q6afe_dai_priv_data priv[AFE_PORT_MAX];
+ };
+ 
++/*
++ * Surface Pro X bring-up: force the sample width the ADSP uses on its SLIMbus
++ * ports. 0 = use the stream format. Takes effect on the next stream start.
++ */
++static int spx_slim_bits;
++module_param(spx_slim_bits, int, 0644);
++MODULE_PARM_DESC(spx_slim_bits, "Force ADSP SLIMbus port bit width (0 = auto, 16, 24, 32)");
++
+ static int q6slim_hw_params(struct snd_pcm_substream *substream,
+ 			    struct snd_pcm_hw_params *params,
+ 			    struct snd_soc_dai *dai)
+@@ -61,6 +69,12 @@ static int q6slim_hw_params(struct snd_pcm_substream *substream,
+ 		return -EINVAL;
+ 	}
+ 
++	if (spx_slim_bits) {
++		dev_info(dai->dev, "spx-dbg: ADSP SLIMbus bit width forced %d -> %d\n",
++			 slim->bit_width, spx_slim_bits);
++		slim->bit_width = spx_slim_bits;
++	}
++
+ 	return 0;
+ }
+ 

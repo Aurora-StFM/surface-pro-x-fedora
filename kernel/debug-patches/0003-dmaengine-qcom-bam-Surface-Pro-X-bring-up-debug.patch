@@ -1,0 +1,79 @@
+diff --git a/drivers/dma/qcom/bam_dma.c b/drivers/dma/qcom/bam_dma.c
+index 2cf0601..186c9a3 100644
+--- a/drivers/dma/qcom/bam_dma.c
++++ b/drivers/dma/qcom/bam_dma.c
+@@ -41,6 +41,7 @@
+ #include <linux/clk.h>
+ #include <linux/dmaengine.h>
+ #include <linux/pm_runtime.h>
++#include <linux/delay.h>
+ 
+ #include "../dmaengine.h"
+ #include "../virt-dma.h"
+@@ -461,6 +462,18 @@ static void bam_reset(struct bam_device *bdev)
+  *
+  * This function resets a specific BAM channel
+  */
++/*
++ * Surface Pro X bring-up: log each register access on the LPASS SLIMbus BAM
++ * (0x17184000) and pause, so the last step reaches the screen before a
++ * possible hard lockup. Runs with a spinlock held, hence mdelay().
++ */
++#define SPX_BAM_STEP(bdev, fmt, ...) do {				\
++	if (strstr(dev_name((bdev)->dev), "17184000")) {		\
++		dev_info((bdev)->dev, "spx-dbg: " fmt "\n", ##__VA_ARGS__); \
++		mdelay(250);						\
++	}								\
++} while (0)
++
+ static void bam_reset_channel(struct bam_chan *bchan)
+ {
+ 	struct bam_device *bdev = bchan->bdev;
+@@ -468,8 +481,11 @@ static void bam_reset_channel(struct bam_chan *bchan)
+ 	lockdep_assert_held(&bchan->vc.lock);
+ 
+ 	/* reset channel */
++	SPX_BAM_STEP(bdev, "pipe %u: reset (P_RST at +0x%lx)", bchan->id,
++		     (unsigned long)(bam_addr(bdev, bchan->id, BAM_P_RST) - bdev->regs));
+ 	writel_relaxed(1, bam_addr(bdev, bchan->id, BAM_P_RST));
+ 	writel_relaxed(0, bam_addr(bdev, bchan->id, BAM_P_RST));
++	SPX_BAM_STEP(bdev, "pipe %u: reset done", bchan->id);
+ 
+ 	/* don't allow cpu to reorder BAM register accesses done after this */
+ 	wmb();
+@@ -498,6 +514,8 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
+ 	 * write out 8 byte aligned address.  We have enough space for this
+ 	 * because we allocated 1 more descriptor (8 bytes) than we can use
+ 	 */
++	SPX_BAM_STEP(bdev, "pipe %u: descriptor FIFO at DMA address %pad",
++		     bchan->id, &bchan->fifo_phys);
+ 	writel_relaxed(ALIGN(bchan->fifo_phys, sizeof(struct bam_desc_hw)),
+ 			bam_addr(bdev, bchan->id, BAM_P_DESC_FIFO_ADDR));
+ 	writel_relaxed(BAM_FIFO_SIZE,
+@@ -506,11 +524,16 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
+ 	/* enable the per pipe interrupts, enable EOT, ERR, and INT irqs */
+ 	writel_relaxed(P_DEFAULT_IRQS_EN,
+ 			bam_addr(bdev, bchan->id, BAM_P_IRQ_EN));
++	SPX_BAM_STEP(bdev, "pipe %u: pipe registers written; reading EE %u IRQ mask (+0x%lx)",
++		     bchan->id, bdev->ee,
++		     (unsigned long)(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE) - bdev->regs));
+ 
+ 	/* unmask the specific pipe and EE combo */
+ 	val = readl_relaxed(bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
++	SPX_BAM_STEP(bdev, "pipe %u: EE IRQ mask 0x%08x, writing it back", bchan->id, val);
+ 	val |= BIT(bchan->id);
+ 	writel_relaxed(val, bam_addr(bdev, 0, BAM_IRQ_SRCS_MSK_EE));
++	SPX_BAM_STEP(bdev, "pipe %u: EE IRQ mask written", bchan->id);
+ 
+ 	/* don't allow cpu to reorder the channel enable done below */
+ 	wmb();
+@@ -520,7 +543,9 @@ static void bam_chan_init_hw(struct bam_chan *bchan,
+ 	if (dir == DMA_DEV_TO_MEM)
+ 		val |= P_DIRECTION;
+ 
++	SPX_BAM_STEP(bdev, "pipe %u: enabling pipe (BAM starts reading memory through the IOMMU)", bchan->id);
+ 	writel_relaxed(val, bam_addr(bdev, bchan->id, BAM_P_CTRL));
++	SPX_BAM_STEP(bdev, "pipe %u: pipe enabled", bchan->id);
+ 
+ 	bchan->initialized = 1;
+ 

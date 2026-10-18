@@ -1,0 +1,3 @@
+# Services the Surface Pro X remote processors (WiFi/modem) need.
+enable rmtfs.service
+enable tqftpserv.service

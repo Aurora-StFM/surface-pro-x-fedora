@@ -1,0 +1,274 @@
+#!/usr/bin/bash
+# Collect hardware and driver diagnostics on a Surface Pro X running Fedora.
+#
+# Usage: sudo surface-pro-x-diag [--no-sanitize] [--out DIR]
+#
+# Writes surface-pro-x-diag-<date>.tar.gz to your home folder and prints a
+# short health summary. Nothing on the system is changed.
+#
+# Privacy: MAC addresses, serial numbers, IP addresses and WiFi network names
+# are masked unless you pass --no-sanitize. Read the files before sharing if
+# you want to be sure.
+
+set -u
+export LC_ALL=C
+
+SANITIZE=1
+OUT_PARENT=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-sanitize) SANITIZE=0; shift ;;
+        --out) OUT_PARENT="$2"; shift 2 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+        *) echo "unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run with sudo: many logs and debug files are only readable by root." >&2
+    exit 1
+fi
+
+if [ -z "$OUT_PARENT" ]; then
+    if [ -n "${SUDO_USER:-}" ]; then
+        OUT_PARENT="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+    else
+        OUT_PARENT="$HOME"
+    fi
+fi
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+NAME="surface-pro-x-diag-$STAMP"
+D="$(mktemp -d)/$NAME"
+mkdir -p "$D"
+
+# Mount debugfs for deferred-probe, clock, regulator and GPIO state.
+DEBUGFS_MOUNTED=0
+if [ ! -d /sys/kernel/debug/clk ] && mount -t debugfs none /sys/kernel/debug 2>/dev/null; then
+    DEBUGFS_MOUNTED=1
+fi
+
+# run FILE CMD...  - save a command's output; never fail, never hang.
+run() {
+    local f="$D/$1"; shift
+    mkdir -p "$(dirname "$f")"
+    {
+        echo "\$ $*"
+        timeout 30 "$@" 2>&1
+        echo "[exit $?]"
+    } >> "$f"
+}
+# grab FILE PATH... - copy readable files (sysfs/procfs/debugfs).
+grab() {
+    local f="$D/$1"; shift
+    mkdir -p "$(dirname "$f")"
+    local p
+    for p in "$@"; do
+        [ -r "$p" ] || continue
+        { echo "==> $p"; timeout 10 cat "$p" 2>&1; echo; } >> "$f"
+    done
+}
+have() { command -v "$1" >/dev/null 2>&1; }
+
+echo "Collecting diagnostics, this takes about a minute..."
+
+# ---- system ---------------------------------------------------------------
+run system/basics.txt uname -a
+run system/basics.txt cat /etc/os-release
+run system/basics.txt cat /proc/cmdline
+run system/basics.txt uptime
+run system/basics.txt rpm -q kernel-spx surface-pro-x-firmware surface-pro-x-support rmtfs tqftpserv linux-firmware qcom-firmware atheros-firmware
+run system/basics.txt systemctl --failed --no-pager
+run system/basics.txt getenforce
+grab system/device-tree-model.txt /proc/device-tree/model /proc/device-tree/compatible
+for f in /sys/devices/soc0/*; do
+    case "$f" in *serial*) continue ;; esac
+    [ -f "$f" ] && grab system/socinfo.txt "$f"
+done
+cp /sys/firmware/fdt "$D/system/running.dtb" 2>/dev/null
+grab system/efi.txt /sys/firmware/efi/systab /sys/firmware/efi/fw_platform_size
+run system/efi.txt efibootmgr -v
+run system/memory.txt cat /proc/meminfo
+run system/memory.txt cat /proc/iomem
+run system/interrupts.txt cat /proc/interrupts
+
+# ---- logs -----------------------------------------------------------------
+run logs/kernel-this-boot.txt journalctl -k -b 0 --no-pager -o short-monotonic
+run logs/kernel-previous-boot.txt journalctl -k -b -1 --no-pager -o short-monotonic
+run logs/warnings-this-boot.txt journalctl -b 0 -p warning --no-pager
+run logs/boots.txt journalctl --list-boots --no-pager
+run logs/selinux-denials.txt sh -c "journalctl -b 0 --no-pager | grep -i 'avc:.*denied' | tail -n 200"
+run logs/firmware-loading.txt sh -c "journalctl -k -b 0 --no-pager | grep -iE 'firmware|\.mbn|\.bin|\.jsn|\.fw' "
+
+# ---- remote processors (modem/WiFi, audio DSP, compute DSP) -------------------
+for r in /sys/class/remoteproc/remoteproc*; do
+    [ -d "$r" ] || continue
+    grab remoteprocs.txt "$r/name" "$r/state" "$r/firmware" "$r/recovery" "$r/coredump"
+done
+run remoteprocs.txt systemctl status rmtfs tqftpserv --no-pager
+run remoteprocs.txt ls -la /var/lib/rmtfs /dev/qcom_rmtfs_mem1 /dev/qcom_rmtfs_uio1
+run remoteprocs.txt sh -c "journalctl -b 0 -u rmtfs -u tqftpserv --no-pager | tail -n 200"
+if have qrtr-lookup; then run remoteprocs.txt qrtr-lookup; fi
+
+# ---- driver binding / deferred probes ----------------------------------------
+grab drivers/deferred-probes.txt /sys/kernel/debug/devices_deferred
+{
+    echo "# platform devices without a bound driver"
+    for dev in /sys/bus/platform/devices/*; do
+        [ -e "$dev/driver" ] && continue
+        of="$(tr -d '\0' 2>/dev/null < "$dev/of_node/compatible")"
+        [ -n "$of" ] && echo "$(basename "$dev")  [$of]"
+    done
+    echo
+    echo "# platform devices with drivers"
+    for dev in /sys/bus/platform/devices/*; do
+        [ -e "$dev/driver" ] || continue
+        echo "$(basename "$dev") -> $(basename "$(readlink "$dev/driver")")"
+    done
+} > "$D/drivers/platform-devices.txt" 2>/dev/null
+{
+    for bus in i2c spi serial surface_aggregator auxiliary; do
+        [ -d "/sys/bus/$bus/devices" ] || continue
+        echo "## $bus"
+        for dev in /sys/bus/"$bus"/devices/*; do
+            [ -e "$dev" ] || continue
+            drv="-"; [ -e "$dev/driver" ] && drv="$(basename "$(readlink "$dev/driver")")"
+            name="$(cat "$dev/name" 2>/dev/null)"; mod="$(cat "$dev/modalias" 2>/dev/null)"
+            echo "$(basename "$dev")  name=$name  modalias=$mod  driver=$drv"
+        done
+        echo
+    done
+} > "$D/drivers/buses.txt" 2>/dev/null
+run drivers/modules.txt lsmod
+grab drivers/debugfs-state.txt /sys/kernel/debug/clk/clk_summary
+grab drivers/regulators.txt /sys/kernel/debug/regulator/regulator_summary
+grab drivers/gpio.txt /sys/kernel/debug/gpio
+grab drivers/interconnect.txt /sys/kernel/debug/interconnect/interconnect_summary
+
+# ---- buses and devices ------------------------------------------------------------
+if have lspci; then run devices/pci.txt lspci -nnvvv; fi
+if have lsusb; then run devices/usb.txt lsusb -tv; run devices/usb.txt lsusb -v; fi
+run devices/block.txt lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,MODEL
+grab devices/nvme.txt /sys/class/nvme/nvme0/model /sys/class/nvme/nvme0/firmware_rev
+grab devices/input.txt /proc/bus/input/devices
+if have libinput; then run devices/input.txt libinput list-devices; fi
+for h in /sys/bus/hid/devices/*; do
+    [ -e "$h/uevent" ] && grab devices/hid.txt "$h/uevent"
+done
+grab devices/iio.txt /sys/bus/iio/devices/*/name
+
+# ---- display and GPU ------------------------------------------------------------------
+for c in /sys/class/drm/card*-*; do
+    [ -d "$c" ] && grab display/connectors.txt "$c/status" "$c/enabled" "$c/modes"
+done
+grab display/gpu.txt /sys/kernel/debug/dri/0/name /sys/kernel/debug/dri/0/gpu
+run display/gpu.txt sh -c "ls -la /dev/dri"
+if have glxinfo; then run display/gpu.txt glxinfo -B; fi
+
+# ---- audio ---------------------------------------------------------------------------
+grab audio/alsa.txt /proc/asound/cards /proc/asound/pcm
+if have aplay; then run audio/alsa.txt aplay -l; fi
+run audio/alsa.txt sh -c "ls /sys/bus/soundwire/devices 2>/dev/null; ls /sys/class/sound 2>/dev/null"
+grab audio/alsa.txt /proc/asound/card*/id /sys/class/sound/card*/device/uevent
+run audio/buses.txt sh -c "ls -l /sys/bus/slimbus/devices/ /sys/bus/soundwire/devices/ 2>&1"
+if have amixer; then
+    for c in /proc/asound/card[0-9]*; do
+        [ -d "$c" ] && run "audio/mixer-$(basename "$c").txt" amixer -c "${c##*card}" contents
+    done
+fi
+if have alsaucm; then run audio/ucm.txt alsaucm listcards; run audio/ucm.txt alsaucm -c 0 list _verbs; fi
+run audio/kernel-audio.txt sh -c "journalctl -k -b 0 --no-pager | grep -iE 'slim|wcd|wsa|q6|apr|asoc|snd|sound|soundwire|swr|lpass|adsp|arm-smmu|smmu'"
+
+# ---- networking / radios ---------------------------------------------------------------
+run network/devices.txt nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device
+run network/devices.txt ip -br link
+run network/devices.txt rfkill list
+if have iw; then run network/devices.txt iw dev; run network/phy.txt iw phy; fi
+if have bluetoothctl; then run network/bluetooth.txt bluetoothctl show; fi
+run network/bluetooth.txt sh -c "journalctl -k -b 0 --no-pager | grep -iE 'bluetooth|hci|qca' "
+if have mmcli; then run network/modem.txt mmcli -L; run network/modem.txt mmcli -m any; fi
+ls /dev/wwan* > "$D/network/wwan-devices.txt" 2>&1
+
+# ---- power, thermal, CPU -------------------------------------------------------------
+for p in /sys/class/power_supply/*; do
+    [ -e "$p/uevent" ] && grab power/supplies.txt "$p/uevent"
+done
+grab power/sleep.txt /sys/power/state /sys/power/mem_sleep
+for z in /sys/class/thermal/thermal_zone*; do
+    [ -d "$z" ] && echo "$(cat "$z/type" 2>/dev/null): $(cat "$z/temp" 2>/dev/null)" >> "$D/power/thermal.txt"
+done
+for c in /sys/devices/system/cpu/cpufreq/policy*; do
+    [ -d "$c" ] || continue
+    grab power/cpufreq.txt "$c/related_cpus" "$c/cpuinfo_min_freq" "$c/cpuinfo_max_freq" \
+        "$c/scaling_available_frequencies" "$c/scaling_cur_freq" "$c/scaling_driver" "$c/scaling_governor"
+done
+run power/cpu.txt lscpu
+
+# ---- boot configuration -----------------------------------------------------------------
+run boot/entries.txt sh -c 'for f in /boot/loader/entries/*.conf; do echo "== $f"; cat "$f"; done'
+grab boot/cmdline.txt /etc/kernel/cmdline /etc/surface-pro-x/kernel-args
+run boot/dtb.txt sh -c 'ls -la /boot/dtb-*/qcom/'
+
+# ---- sanitize -------------------------------------------------------------------------
+if [ "$SANITIZE" -eq 1 ]; then
+    find "$D" -type f ! -name '*.dtb' -print0 | xargs -0 -r sed -i -E \
+        -e 's/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/XX:XX:XX:XX:XX:XX/g' \
+        -e 's/(SERIAL(_NUMBER|_SHORT)?=).*/\1<removed>/I' \
+        -e 's/(iSerial +[0-9]+ +)[^ ]+/\1<removed>/g' \
+        -e 's/((SerialNumber|Serial Number|serial_number|serial-number)[ :=]+)[^ ]+/\1<removed>/g' \
+        -e 's/(SSID[: ]+).*/\1<removed>/'
+    # IP addresses only in the network files; elsewhere dotted numbers are versions.
+    find "$D/network" -type f -print0 | xargs -0 -r sed -i -E \
+        -e 's/\b([0-9]{1,3}\.){3}[0-9]{1,3}\b/x.x.x.x/g'
+fi
+
+# ---- summary -------------------------------------------------------------------------
+S="$D/SUMMARY.txt"
+k() { journalctl -k -b 0 --no-pager 2>/dev/null; }
+{
+    echo "Surface Pro X diagnostics $STAMP"
+    echo "kernel:  $(uname -r)"
+    echo "model:   $(tr -d '\0' 2>/dev/null < /proc/device-tree/model)"
+    echo "soc:     $(cat /sys/devices/soc0/machine 2>/dev/null) rev $(cat /sys/devices/soc0/revision 2>/dev/null)"
+    echo "cpu max: $(for c in /sys/devices/system/cpu/cpufreq/policy*; do printf '%s ' "$(( $(cat "$c/cpuinfo_max_freq" 2>/dev/null || echo 0) / 1000 ))MHz"; done)"
+    echo
+    echo "remote processors:"
+    for r in /sys/class/remoteproc/remoteproc*; do
+        [ -d "$r" ] && echo "  $(cat "$r/name" 2>/dev/null): $(cat "$r/state" 2>/dev/null)"
+    done
+    echo
+    st() { if eval "$2" >/dev/null 2>&1; then echo "  [ok]      $1"; else echo "  [missing] $1"; fi; }
+    st "GPU driver (msm) loaded"          "lsmod | grep -q '^msm '"
+    st "display connector connected"     "grep -qx connected /sys/class/drm/card*-*/status"
+    st "WiFi interface"                   "ls /sys/class/ieee80211/ | grep -q ."
+    st "Bluetooth controller"             "ls /sys/class/bluetooth/ | grep -q hci"
+    st "rmtfs service active"             "systemctl -q is-active rmtfs"
+    st "tqftpserv service active"         "systemctl -q is-active tqftpserv"
+    st "battery"                          "ls /sys/class/power_supply/ | grep -qiE 'bat'"
+    st "Type Cover keyboard (SAM HID)"    "grep -qi 'surface' /proc/bus/input/devices"
+    st "touchscreen/pen (IPTS / SPI HID)" "lsmod | grep -qE 'spi_hid|ipts'"
+    st "sound card"                       "grep -q . /proc/asound/cards && ! grep -q 'no soundcards' /proc/asound/cards"
+    st "LTE modem (WWAN)"                 "ls /dev/wwan* 2>/dev/null | grep -q ."
+    st "suspend to RAM offered"           "grep -q mem /sys/power/state"
+    echo
+    if [ -r /sys/kernel/debug/devices_deferred ]; then
+        echo "deferred probes: $(grep -c . /sys/kernel/debug/devices_deferred)"
+    else
+        echo "deferred probes: unknown (debugfs not available)"
+    fi
+    echo "firmware load failures: $(k | grep -ciE 'direct firmware load .* failed|failed to load firmware')"
+    echo "kernel errors this boot: $(journalctl -k -b 0 -p err --no-pager -q 2>/dev/null | grep -c .)"
+    echo "failed units: $(systemctl --failed --no-legend 2>/dev/null | grep -c .)"
+    echo "SELinux denials this boot: $(grep -v '^\$ ' "$D/logs/selinux-denials.txt" 2>/dev/null | grep -c 'denied')"
+} > "$S"
+
+[ "$DEBUGFS_MOUNTED" -eq 1 ] && umount /sys/kernel/debug 2>/dev/null
+
+ARCHIVE="$OUT_PARENT/$NAME.tar.gz"
+tar -C "$(dirname "$D")" -czf "$ARCHIVE" "$NAME"
+[ -n "${SUDO_USER:-}" ] && chown "$SUDO_USER": "$ARCHIVE"
+echo
+cat "$S"
+rm -rf "$(dirname "$D")"
+echo
+echo "Saved: $ARCHIVE"

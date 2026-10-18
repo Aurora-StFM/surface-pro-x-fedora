@@ -1,0 +1,407 @@
+From 82b72d43d20af7718180afc1f41f814b4fb5bb1f Mon Sep 17 00:00:00 2001
+From: Surface Pro X Fedora kit <spx@localhost>
+Date: Fri, 16 Oct 2026 15:40:20 +0200
+Subject: [PATCH] arm64: dts: qcom: sc8180x: surface-pro-x: Add audio (WCD9340,
+ WSA881x)
+
+The Surface Pro X uses the same audio design as the SDM850 Lenovo Yoga
+C630: a WCD9340 codec on SLIMbus with two WSA881x speaker amplifiers on
+the codec's SoundWire master, driven by the ADSP's APR/Q6 services.
+
+SoC (sc8180x.dtsi):
+- Add the APR node with q6core/q6afe/q6asm/q6adm under the ADSP glink
+  edge. The ADSP firmware (qcadsp8180.mbn) is the Elite/APR framework of
+  the SDM845 generation.
+- Add the SLIMbus NGD controller (0x171c0000, SPI 163) and its BAM DMA
+  (0x17184000, SPI 164). Both match SDM845 and the Windows DSDT
+  (\_SB.ADSP.SLM1, \_SB.BAM5). SMMU stream IDs are taken from SDM845 and
+  are unverified.
+
+Board (sc8180x-surface-pro-x.dts):
+- Add vreg_l14e_1p8 (codec supply, LDO14_E per the DSDT PEP table).
+- Add the WCD9340, the two WSA881x speakers and the sound card,
+  following the Yoga C630.
+- Codec reset is TLMM 143 (GpioIo of \_SB.ADSP.SLM1.ADCM.AUDD). The codec
+  interrupt is TLMM 123, decoded from the Windows direct-connect
+  interrupt number 0x100 via \_SB.GIO0._CRS and the SC8180X PDC map.
+
+Untested on hardware.
+---
+ .../boot/dts/qcom/sc8180x-surface-pro-x.dts   | 233 ++++++++++++++++++
+ arch/arm64/boot/dts/qcom/sc8180x.dtsi         |  91 +++++++
+ 2 files changed, 324 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts b/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts
+index a0b4abba3..e2e594917 100644
+--- a/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts
++++ b/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts
+@@ -13,6 +13,8 @@
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+ #include <dt-bindings/spmi/spmi.h>
+ #include <dt-bindings/iio/qcom,spmi-vadc.h>
++#include <dt-bindings/sound/qcom,q6afe.h>
++#include <dt-bindings/sound/qcom,q6asm.h>
+ #include "sc8180x.dtsi"
+ 
+ 
+@@ -413,6 +415,13 @@ vreg_l9e_0p88: ldo9 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		/* WCD9340 codec supply: "PPP_RESOURCE_ID_LDO14_E" at 1.8 V in the DSDT PEP table */
++		vreg_l14e_1p8: ldo14 {
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_l16e_3p1: ldo16 {
+ 			regulator-min-microvolt = <3072000>;
+ 			regulator-max-microvolt = <3072000>;
+@@ -1254,3 +1263,227 @@ &wifi {
+ 	vdd-3.3-ch0-supply = <&vreg_l11c_3p3>;
+ 	vdd-3.3-ch1-supply = <&vreg_l10c_3p3>;
+ };
++
++
++/*
++ * Audio
++ *
++ * Same design as the SDM850 Lenovo Yoga C630: WCD9340 codec on SLIMbus with
++ * two WSA881x speaker amplifiers on the codec's SoundWire bus, driven by the
++ * ADSP's APR/Q6 services. Values from the Windows DSDT and driver packages:
++ *   - codec MCLK: CXO_BUFFERS_BBCLK2 (RPMH_LN_BB_CLK2)
++ *   - codec supply: LDO14_E, 1.8 V
++ *   - codec reset: TLMM 143 (GpioIo in \_SB.ADSP.SLM1.ADCM.AUDD)
++ *   - codec interrupt: TLMM 123. The DSDT gives GpioInt 0x100, a Windows
++ *     "direct-connect" number: 0x100 + 0x40 * k selects interrupt k + 1 of
++ *     \_SB.GIO0._CRS (here GIC 0x25b = SPI 571 = PDC 91 = GPIO 123). The rule
++ *     checks out on the lid (0x140 -> GPIO 121) and the SAM (0x1c0 -> GPIO 180,
++ *     0x200 -> GPIO 133) entries, which list their real pins as well.
++ *     (TLMM 54, the SDM845 reference value, is the touchscreen reset here.)
++ */
++
++/ {
++	sound: sound {
++		compatible = "qcom,sdm845-sndcard";
++		model = "Microsoft-Surface-Pro-X";
++
++		audio-routing =
++			"RX_BIAS", "MCLK",
++			"AMIC2", "MIC BIAS2",
++			"SpkrLeft IN", "SPK1 OUT",
++			"SpkrRight IN", "SPK2 OUT";
++
++		mm1-dai-link {
++			link-name = "MultiMedia1";
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA1>;
++			};
++		};
++
++		mm2-dai-link {
++			link-name = "MultiMedia2";
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA2>;
++			};
++		};
++
++		mm3-dai-link {
++			link-name = "MultiMedia3";
++			cpu {
++				sound-dai = <&q6asmdai MSM_FRONTEND_DAI_MULTIMEDIA3>;
++			};
++		};
++
++		slim-dai-link {
++			link-name = "SLIM Playback";
++			cpu {
++				sound-dai = <&q6afedai SLIMBUS_0_RX>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&left_spkr>, <&right_spkr>, <&swm 0>, <&wcd9340 0>;
++			};
++		};
++
++		slimcap-dai-link {
++			link-name = "SLIM Capture";
++			cpu {
++				sound-dai = <&q6afedai SLIMBUS_0_TX>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&wcd9340 1>;
++			};
++		};
++
++		slim-wcd-dai-link {
++			link-name = "SLIM WCD Playback";
++			cpu {
++				sound-dai = <&q6afedai SLIMBUS_1_RX>;
++			};
++
++			platform {
++				sound-dai = <&q6routing>;
++			};
++
++			codec {
++				sound-dai = <&wcd9340 2>;
++			};
++		};
++	};
++};
++
++&q6asmdai {
++	dai@0 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA1>;
++	};
++
++	dai@1 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA2>;
++	};
++
++	dai@2 {
++		reg = <MSM_FRONTEND_DAI_MULTIMEDIA3>;
++	};
++};
++
++&slimbam {
++	status = "okay";
++};
++
++&slim {
++	status = "okay";
++
++	slim@1 {
++		reg = <1>;
++		#address-cells = <2>;
++		#size-cells = <0>;
++
++		wcd9340_ifd: ifd@0,0 {
++			compatible = "slim217,250";
++			reg = <0 0>;
++		};
++
++		wcd9340: codec@1,0 {
++			compatible = "slim217,250";
++			reg = <1 0>;
++			slim-ifc-dev = <&wcd9340_ifd>;
++
++			#sound-dai-cells = <1>;
++
++			reset-gpios = <&tlmm 143 GPIO_ACTIVE_HIGH>;
++
++			interrupts-extended = <&tlmm 123 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-controller;
++			#interrupt-cells = <1>;
++
++			clock-names = "extclk";
++			clocks = <&rpmhcc RPMH_LN_BB_CLK2>;
++
++			#clock-cells = <0>;
++			clock-frequency = <9600000>;
++			clock-output-names = "mclk";
++
++			pinctrl-0 = <&wcd_intr_default>;
++			pinctrl-names = "default";
++
++			vdd-buck-supply = <&vreg_l14e_1p8>;
++			vdd-buck-sido-supply = <&vreg_l14e_1p8>;
++			vdd-tx-supply = <&vreg_l14e_1p8>;
++			vdd-rx-supply = <&vreg_l14e_1p8>;
++			vdd-io-supply = <&vreg_l14e_1p8>;
++
++			qcom,micbias1-microvolt = <1800000>;
++			qcom,micbias2-microvolt = <1800000>;
++			qcom,micbias3-microvolt = <1800000>;
++			qcom,micbias4-microvolt = <1800000>;
++
++			qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
++			qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
++			qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
++
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			wcdgpio: gpio-controller@42 {
++				compatible = "qcom,wcd9340-gpio";
++				gpio-controller;
++				#gpio-cells = <2>;
++				reg = <0x42 0x2>;
++			};
++
++			swm: soundwire@c85 {
++				compatible = "qcom,soundwire-v1.3.0";
++				reg = <0xc85 0x40>;
++				interrupts-extended = <&wcd9340 20>;
++
++				qcom,dout-ports = <6>;
++				qcom,din-ports = <2>;
++				qcom,ports-sinterval-low = /bits/ 8 <0x07 0x1f 0x3f 0x7 0x1f 0x3f 0x0f 0x0f>;
++				qcom,ports-offset1 = /bits/ 8 <0x01 0x02 0x0c 0x6 0x12 0x0d 0x07 0x0a>;
++				qcom,ports-offset2 = /bits/ 8 <0x00 0x00 0x1f 0x00 0x00 0x1f 0x00 0x00>;
++
++				#sound-dai-cells = <1>;
++				clocks = <&wcd9340>;
++				clock-names = "iface";
++				#address-cells = <2>;
++				#size-cells = <0>;
++
++				left_spkr: speaker@0,3 {
++					compatible = "sdw10217211000";
++					reg = <0 3>;
++					powerdown-gpios = <&wcdgpio 1 GPIO_ACTIVE_LOW>;
++					#thermal-sensor-cells = <0>;
++					sound-name-prefix = "SpkrLeft";
++					#sound-dai-cells = <0>;
++				};
++
++				right_spkr: speaker@0,4 {
++					compatible = "sdw10217211000";
++					reg = <0 4>;
++					powerdown-gpios = <&wcdgpio 2 GPIO_ACTIVE_LOW>;
++					#thermal-sensor-cells = <0>;
++					sound-name-prefix = "SpkrRight";
++					#sound-dai-cells = <0>;
++				};
++			};
++		};
++	};
++};
++
++&tlmm {
++	wcd_intr_default: wcd-intr-default-state {
++		pins = "gpio123";
++		function = "gpio";
++		bias-pull-down;
++		drive-strength = <2>;
++	};
++};
+diff --git a/arch/arm64/boot/dts/qcom/sc8180x.dtsi b/arch/arm64/boot/dts/qcom/sc8180x.dtsi
+index 21124c47e..108d3bef9 100644
+--- a/arch/arm64/boot/dts/qcom/sc8180x.dtsi
++++ b/arch/arm64/boot/dts/qcom/sc8180x.dtsi
+@@ -17,6 +17,7 @@
+ #include <dt-bindings/interrupt-controller/arm-gic.h>
+ #include <dt-bindings/phy/phy-qcom-qmp.h>
+ #include <dt-bindings/power/qcom-rpmpd.h>
++#include <dt-bindings/soc/qcom,apr.h>
+ #include <dt-bindings/soc/qcom,rpmh-rsc.h>
+ #include <dt-bindings/thermal/thermal.h>
+ 
+@@ -3718,6 +3719,36 @@ apps_smmu: iommu@15000000 {
+ 			dma-coherent;
+ 		};
+ 
++		/* Same addresses and interrupts as SDM845 (checked against the DSDT). */
++		slimbam: dma-controller@17184000 {
++			compatible = "qcom,bam-v1.7.4", "qcom,bam-v1.7.0";
++			qcom,controlled-remotely;
++			reg = <0 0x17184000 0 0x2a000>;
++			num-channels = <23>;
++			interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
++			#dma-cells = <1>;
++			qcom,ee = <1>;
++			qcom,num-ees = <4>;
++			/* Windows IORT, \_SB.ADSP.SLM1.ADCM: 0x1b46 and 0x1b4d-0x1b51 */
++			iommus = <&apps_smmu 0x1b46 0x0>, <&apps_smmu 0x1b4d 0x0>, <&apps_smmu 0x1b4e 0x0>, <&apps_smmu 0x1b4f 0x0>, <&apps_smmu 0x1b50 0x0>, <&apps_smmu 0x1b51 0x0>;
++			status = "disabled";
++		};
++
++		slim: slim-ngd@171c0000 {
++			compatible = "qcom,slim-ngd-v2.1.0";
++			reg = <0 0x171c0000 0 0x2c000>;
++			interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>;
++
++			dmas = <&slimbam 3>, <&slimbam 4>;
++			dma-names = "rx", "tx";
++
++			/* Windows IORT, \_SB.ADSP.SLM1.ADCM: 0x1b46 and 0x1b4d-0x1b51 */
++			iommus = <&apps_smmu 0x1b46 0x0>, <&apps_smmu 0x1b4d 0x0>, <&apps_smmu 0x1b4e 0x0>, <&apps_smmu 0x1b4f 0x0>, <&apps_smmu 0x1b50 0x0>, <&apps_smmu 0x1b51 0x0>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
+ 		remoteproc_adsp: remoteproc@17300000 {
+ 			compatible = "qcom,sc8180x-adsp-pas";
+ 			reg = <0x0 0x17300000 0x0 0x4040>;
+@@ -3748,6 +3779,66 @@ remoteproc_adsp_glink: glink-edge {
+ 				label = "lpass";
+ 				qcom,remote-pid = <2>;
+ 				mboxes = <&apss_shared 8>;
++
++				/*
++				 * The SC8180X ADSP runs the SDM845-generation
++				 * Elite/APR audio framework (see the
++				 * map_AVS_SHARED_LIBS_845 maps in the Windows
++				 * driver package), so describe it like SDM845.
++				 */
++				apr {
++					compatible = "qcom,apr-v2";
++					qcom,glink-channels = "apr_audio_svc";
++					qcom,domain = <APR_DOMAIN_ADSP>;
++					#address-cells = <1>;
++					#size-cells = <0>;
++					qcom,intents = <512 20>;
++
++					service@3 {
++						reg = <APR_SVC_ADSP_CORE>;
++						compatible = "qcom,q6core";
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++					};
++
++					q6afe: service@4 {
++						compatible = "qcom,q6afe";
++						reg = <APR_SVC_AFE>;
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++
++						q6afedai: dais {
++							compatible = "qcom,q6afe-dais";
++							#address-cells = <1>;
++							#size-cells = <0>;
++							#sound-dai-cells = <1>;
++						};
++					};
++
++					q6asm: service@7 {
++						compatible = "qcom,q6asm";
++						reg = <APR_SVC_ASM>;
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++
++						q6asmdai: dais {
++							compatible = "qcom,q6asm-dais";
++							#address-cells = <1>;
++							#size-cells = <0>;
++							#sound-dai-cells = <1>;
++							/* Windows IORT, \_SB.ADSP.SLM1.ADCM: first mapping, 0x1b21 */
++							iommus = <&apps_smmu 0x1b21 0x0>;
++						};
++					};
++
++					q6adm: service@8 {
++						compatible = "qcom,q6adm";
++						reg = <APR_SVC_ADM>;
++						qcom,protection-domain = "avs/audio", "msm/adsp/audio_pd";
++
++						q6routing: routing {
++							compatible = "qcom,q6adm-routing";
++							#sound-dai-cells = <0>;
++						};
++					};
++				};
+ 			};
+ 		};
+ 
+-- 
+2.43.0
+

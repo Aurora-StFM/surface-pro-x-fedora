@@ -1,0 +1,13 @@
+# Surface Pro X: build a generic initramfs so the same system boots from USB
+# and from the internal NVMe drive. Storage, PCIe and USB drivers are built
+# into kernel-spx; the Type Cover keyboard needs these modules for the
+# emergency shell and disk unlock prompts.
+hostonly="no"
+# Rescue entries would boot without the device tree, so skip them.
+dracut_rescue_image="no"
+add_drivers+=" surface_aggregator surface_aggregator_registry surface_aggregator_hub surface_hid_core surface_hid "
+# qcom_q6v5_pas stays in the initramfs for now. From there it tries to start
+# the audio and compute DSPs before their firmware is reachable, so they stay
+# offline and the audio DSP is started by hand (see README). Omitting the
+# driver here (omit_drivers+=" qcom_q6v5_pas ") would start both DSPs at boot;
+# that waits until the compute DSP (cdsp) has been tested.

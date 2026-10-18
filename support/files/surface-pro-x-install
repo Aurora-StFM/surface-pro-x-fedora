@@ -1,0 +1,222 @@
+#!/usr/bin/bash
+# Copy the running Fedora system (booted from USB) into free space on the
+# Surface Pro X's internal drive, next to Windows.
+#
+# Usage: sudo surface-pro-x-install [--disk /dev/nvme0n1] [--yes]
+#
+# What it does:
+#   1. Finds the largest unallocated region on the target disk (you create it
+#      beforehand by shrinking Windows in Disk Management).
+#   2. Creates three new partitions there: a Fedora EFI partition (600 MiB),
+#      /boot (1 GiB, ext4) and root (rest, btrfs). Existing partitions,
+#      including Windows and its EFI partition, are not modified.
+#   3. Copies this system with btrfs send/receive, so SELinux labels and
+#      subvolumes are kept, then rewrites UUIDs in fstab, the kernel command
+#      line, the boot entries and the GRUB config.
+#   4. Adds a "Windows Boot Manager" item to the GRUB menu and a UEFI boot
+#      entry named "Fedora (Surface Pro X)".
+set -euo pipefail
+
+DISK=""
+ASSUME_YES=0
+MIN_FREE_GIB=20
+ESP_MIB=600
+BOOT_MIB=1024
+LABEL="Fedora (Surface Pro X)"
+
+die()  { echo "error: $*" >&2; exit 1; }
+msg()  { echo "==> $*"; }
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --disk) DISK="$2"; shift 2 ;;
+        --yes) ASSUME_YES=1; shift ;;
+        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        *) die "unknown argument: $1" ;;
+    esac
+done
+
+[ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
+for c in sfdisk partx lsblk blkid findmnt mkfs.vfat mkfs.ext4 mkfs.btrfs btrfs efibootmgr uuidgen grub2-editenv; do
+    command -v "$c" >/dev/null || die "missing command: $c"
+done
+
+# ---- source system ------------------------------------------------------
+ROOT_SRC="$(findmnt -no SOURCE /)"
+ROOT_DEV="${ROOT_SRC%%\[*}"
+[ "$(findmnt -no FSTYPE /)" = "btrfs" ] || die "/ is not btrfs; this script expects a Fedora disk image"
+BOOT_DEV="$(findmnt -no SOURCE /boot)" || die "/boot is not a separate partition"
+ESP_DEV="$(findmnt -no SOURCE /boot/efi)" || die "/boot/efi is not mounted"
+SRC_DISK="/dev/$(lsblk -no PKNAME "$ROOT_DEV" | head -n1)"
+
+OLD_ROOT_UUID="$(blkid -s UUID -o value "$ROOT_DEV")"
+OLD_BOOT_UUID="$(blkid -s UUID -o value "$BOOT_DEV")"
+OLD_ESP_UUID="$(blkid -s UUID -o value "$ESP_DEV")"
+
+# ---- target disk --------------------------------------------------------
+if [ -z "$DISK" ]; then
+    DISK="$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" && $1 ~ /nvme/ { print $1; exit }')"
+    [ -n "$DISK" ] || die "no NVMe disk found; pass --disk"
+fi
+[ -b "$DISK" ] || die "$DISK is not a block device"
+[ "$DISK" != "$SRC_DISK" ] || die "$DISK is the disk this system is running from"
+[ "$(blkid -p -s PTTYPE -o value "$DISK" 2>/dev/null)" = "gpt" ] || die "$DISK does not have a GPT partition table"
+
+SECTOR="$(blockdev --getss "$DISK")"
+ALIGN=$(( 1048576 / SECTOR ))
+
+# Largest free region: "start end sectors size" lines from sfdisk -F.
+read -r FREE_START FREE_END FREE_SECTORS < <(
+    sfdisk -F "$DISK" | awk '$1 ~ /^[0-9]+$/ { print $1, $2, $3 }' | sort -k3,3n | tail -n1
+) || true
+[ -n "${FREE_START:-}" ] || die "no unallocated space on $DISK; shrink Windows first"
+
+FREE_START=$(( (FREE_START + ALIGN - 1) / ALIGN * ALIGN ))
+FREE_SECTORS=$(( FREE_END - FREE_START + 1 ))
+FREE_GIB=$(( FREE_SECTORS * SECTOR / 1073741824 ))
+[ "$FREE_GIB" -ge "$MIN_FREE_GIB" ] || die "largest free region is ${FREE_GIB} GiB; need at least ${MIN_FREE_GIB} GiB"
+
+ESP_SECT=$(( ESP_MIB * 1048576 / SECTOR ))
+BOOT_SECT=$(( BOOT_MIB * 1048576 / SECTOR ))
+ESP_START=$FREE_START
+BOOT_START=$(( ESP_START + ESP_SECT ))
+ROOT_START=$(( BOOT_START + BOOT_SECT ))
+ROOT_SECT=$(( (FREE_END - ROOT_START + 1) / ALIGN * ALIGN ))
+
+echo
+lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL "$DISK"
+echo
+echo "Fedora will be installed into ${FREE_GIB} GiB of free space on $DISK:"
+echo "  EFI  ${ESP_MIB} MiB (vfat)   /boot ${BOOT_MIB} MiB (ext4)   root $(( ROOT_SECT * SECTOR / 1073741824 )) GiB (btrfs)"
+echo "Existing partitions are not changed."
+if [ "$ASSUME_YES" -ne 1 ]; then
+    read -r -p "Type YES to continue: " answer
+    [ "$answer" = "YES" ] || die "aborted"
+fi
+
+# ---- partitions ---------------------------------------------------------
+ESP_PUUID="$(uuidgen)"; BOOT_PUUID="$(uuidgen)"; ROOT_PUUID="$(uuidgen)"
+msg "Creating partitions"
+sfdisk --append --no-reread --no-tell-kernel "$DISK" <<EOF
+start=$ESP_START, size=$ESP_SECT, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=$ESP_PUUID, name="Fedora EFI"
+start=$BOOT_START, size=$BOOT_SECT, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=$BOOT_PUUID, name="Fedora boot"
+start=$ROOT_START, size=$ROOT_SECT, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=$ROOT_PUUID, name="Fedora root"
+EOF
+partx -a "$DISK" 2>/dev/null || partx -u "$DISK"
+udevadm settle
+NEW_ESP="/dev/disk/by-partuuid/$ESP_PUUID"
+NEW_BOOT="/dev/disk/by-partuuid/$BOOT_PUUID"
+NEW_ROOT="/dev/disk/by-partuuid/$ROOT_PUUID"
+for p in "$NEW_ESP" "$NEW_BOOT" "$NEW_ROOT"; do
+    [ -b "$p" ] || die "partition $p did not appear; reboot from USB and run again"
+done
+NEW_ESP="$(readlink -f "$NEW_ESP")"; NEW_BOOT="$(readlink -f "$NEW_BOOT")"; NEW_ROOT="$(readlink -f "$NEW_ROOT")"
+
+msg "Formatting"
+mkfs.vfat -F 32 -n FEDORA-EFI "$NEW_ESP" >/dev/null
+mkfs.ext4 -q -L fedora-boot "$NEW_BOOT"
+mkfs.btrfs -q -f -L fedora "$NEW_ROOT"
+NEW_ROOT_UUID="$(blkid -s UUID -o value "$NEW_ROOT")"
+NEW_BOOT_UUID="$(blkid -s UUID -o value "$NEW_BOOT")"
+NEW_ESP_UUID="$(blkid -s UUID -o value "$NEW_ESP")"
+
+WORK="$(mktemp -d /tmp/spx-install.XXXXXX)"
+SRC_TOP="$WORK/src"; DST_TOP="$WORK/dst"; TGT="$WORK/target"
+mkdir -p "$SRC_TOP" "$DST_TOP" "$TGT"
+cleanup() {
+    set +e
+    for s in "${SNAPS[@]:-}"; do [ -n "$s" ] && btrfs -q subvolume delete "$SRC_TOP/$s" 2>/dev/null; done
+    umount -R "$TGT" 2>/dev/null
+    umount "$DST_TOP" "$SRC_TOP" 2>/dev/null
+    rmdir "$TGT" "$DST_TOP" "$SRC_TOP" "$WORK" 2>/dev/null
+}
+SNAPS=()
+trap cleanup EXIT
+
+# ---- copy root subvolumes ----------------------------------------------
+msg "Copying system (btrfs send/receive)"
+mount -o subvolid=5 "$ROOT_DEV" "$SRC_TOP"
+mount "$NEW_ROOT" "$DST_TOP"
+mapfile -t SUBVOLS < <(btrfs subvolume list -o "$SRC_TOP" | awk '{ print $NF }' | grep -v '/' | grep -v '^\.spx-')
+[ ${#SUBVOLS[@]} -gt 0 ] || die "no subvolumes found on $ROOT_DEV"
+sync
+for sv in "${SUBVOLS[@]}"; do
+    snap=".spx-$sv"
+    btrfs -q subvolume snapshot -r "$SRC_TOP/$sv" "$SRC_TOP/$snap"
+    SNAPS+=("$snap")
+    echo "    $sv"
+    btrfs send -q "$SRC_TOP/$snap" | btrfs receive -q "$DST_TOP"
+    btrfs -q subvolume snapshot "$DST_TOP/$snap" "$DST_TOP/$sv"
+    btrfs -q subvolume delete "$DST_TOP/$snap"
+done
+
+ROOT_SUBVOL="$(findmnt -no FSROOT /)"; ROOT_SUBVOL="${ROOT_SUBVOL#/}"
+mount -o "subvol=$ROOT_SUBVOL" "$NEW_ROOT" "$TGT"
+mount "$NEW_BOOT" "$TGT/boot"
+mkdir -p "$TGT/boot/efi"
+mount "$NEW_ESP" "$TGT/boot/efi"
+
+msg "Copying /boot and EFI files"
+cp -ax /boot/. "$TGT/boot/"
+cp -r /boot/efi/EFI "$TGT/boot/efi/"
+
+# ---- fix identifiers ----------------------------------------------------
+msg "Updating UUIDs"
+fix_uuids() {
+    [ -f "$1" ] || return 0
+    sed -i -e "s/$OLD_ROOT_UUID/$NEW_ROOT_UUID/g" \
+           -e "s/$OLD_BOOT_UUID/$NEW_BOOT_UUID/g" \
+           -e "s/$OLD_ESP_UUID/$NEW_ESP_UUID/g" "$1"
+}
+fix_uuids "$TGT/etc/fstab"
+fix_uuids "$TGT/etc/kernel/cmdline"
+fix_uuids "$TGT/boot/grub2/grub.cfg"
+fix_uuids "$TGT/boot/grub2/grubenv"
+for f in "$TGT"/boot/loader/entries/*.conf "$TGT"/boot/efi/EFI/*/grub.cfg; do fix_uuids "$f"; done
+grep -q "$NEW_ROOT_UUID" "$TGT/etc/fstab" || echo "warning: root UUID not found in new fstab, check $TGT/etc/fstab" >&2
+
+# ---- Windows entry in GRUB ---------------------------------------------
+WIN_ESP_UUID=""
+while read -r part ptype; do
+    [ "$part" = "$NEW_ESP" ] && continue
+    [ "${ptype,,}" = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" ] || continue
+    m="$WORK/winesp"; mkdir -p "$m"
+    if mount -o ro "$part" "$m" 2>/dev/null; then
+        [ -f "$m/EFI/Microsoft/Boot/bootmgfw.efi" ] && WIN_ESP_UUID="$(blkid -s UUID -o value "$part")"
+        umount "$m"
+    fi
+    rmdir "$m"
+    [ -n "$WIN_ESP_UUID" ] && break
+done < <(lsblk -lpno NAME,PARTTYPE "$DISK" | awk 'NF == 2')
+
+if [ -n "$WIN_ESP_UUID" ]; then
+    msg "Adding Windows to the GRUB menu"
+    cat > "$TGT/boot/grub2/custom.cfg" <<EOF
+menuentry 'Windows Boot Manager' --class windows --class os {
+    insmod part_gpt
+    insmod fat
+    insmod chain
+    search --no-floppy --fs-uuid --set=root $WIN_ESP_UUID
+    chainloader /EFI/Microsoft/Boot/bootmgfw.efi
+}
+EOF
+else
+    echo "warning: Windows EFI partition not found; use the UEFI boot menu to start Windows" >&2
+fi
+grub2-editenv "$TGT/boot/grub2/grubenv" unset menu_auto_hide 2>/dev/null || true
+touch "$TGT/.autorelabel"
+
+# ---- UEFI boot entry ----------------------------------------------------
+msg "Creating UEFI boot entry"
+ESP_PARTN="$(lsblk -no PARTN "$NEW_ESP")"
+LOADER='\EFI\fedora\shimaa64.efi'
+[ -f "$TGT/boot/efi/EFI/fedora/shimaa64.efi" ] || LOADER='\EFI\fedora\grubaa64.efi'
+if ! efibootmgr -q --create --disk "$DISK" --part "$ESP_PARTN" --label "$LABEL" --loader "$LOADER"; then
+    echo "warning: efibootmgr failed. Add the entry from the UEFI shell instead:" >&2
+    echo "         bcfg boot add 0 FSx:$LOADER \"$LABEL\"" >&2
+fi
+
+sync
+msg "Done. Remove the USB drive and reboot."
+echo "    GRUB will show Fedora and Windows Boot Manager."
+echo "    The first boot relabels SELinux contexts and reboots once."

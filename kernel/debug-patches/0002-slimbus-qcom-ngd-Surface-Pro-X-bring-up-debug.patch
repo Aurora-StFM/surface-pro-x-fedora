@@ -1,0 +1,168 @@
+diff --git a/drivers/slimbus/qcom-ngd-ctrl.c b/drivers/slimbus/qcom-ngd-ctrl.c
+index cd40ab8..34a5b31 100644
+--- a/drivers/slimbus/qcom-ngd-ctrl.c
++++ b/drivers/slimbus/qcom-ngd-ctrl.c
+@@ -23,6 +23,21 @@
+ #include <net/sock.h>
+ #include "slimbus.h"
+ 
++/*
++ * Surface Pro X bring-up instrumentation. Each step is logged and followed by
++ * a short pause so the message reaches the screen before a possible hard
++ * lockup. spx_stop: 0 = run normally, 1 = stop before the first register
++ * access (default, safe), 2 = stop before the DMA (BAM) setup, 3 = stop
++ * after the DMA channels and buffers are set up, before the BAM is started.
++ */
++static int spx_stop = 1;
++module_param(spx_stop, int, 0644);
++MODULE_PARM_DESC(spx_stop, "Surface Pro X debug: 0=normal, 1=stop before MMIO, 2=stop before DMA setup, 3=stop before starting rx DMA");
++#define SPX_STEP(c, fmt, ...) do {					\
++	dev_info((c)->dev, "spx-dbg: " fmt "\n", ##__VA_ARGS__);	\
++	msleep(300);							\
++} while (0)
++
+ /* NGD (Non-ported Generic Device) registers */
+ #define	NGD_CFG			0x0
+ #define	NGD_CFG_ENABLE		BIT(0)
+@@ -666,7 +681,9 @@ static int qcom_slim_ngd_post_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
+ 		desc->desc->callback_param = desc;
+ 		desc->desc->cookie = dmaengine_submit(desc->desc);
+ 	}
++	SPX_STEP(ctrl, "rx: descriptors queued, starting DMA");
+ 	dma_async_issue_pending(ctrl->dma_rx_channel);
++	SPX_STEP(ctrl, "rx: DMA started");
+ 
+ 	return 0;
+ }
+@@ -676,6 +693,7 @@ static int qcom_slim_ngd_init_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
+ 	struct device *dev = ctrl->dev;
+ 	int ret, size;
+ 
++	SPX_STEP(ctrl, "rx: requesting DMA channel");
+ 	ctrl->dma_rx_channel = dma_request_chan(dev, "rx");
+ 	if (IS_ERR(ctrl->dma_rx_channel)) {
+ 		dev_err(dev, "Failed to request RX dma channel");
+@@ -684,6 +702,7 @@ static int qcom_slim_ngd_init_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
+ 		return ret;
+ 	}
+ 
++	SPX_STEP(ctrl, "rx: got DMA channel, allocating buffers");
+ 	size = QCOM_SLIM_NGD_DESC_NUM * SLIM_MSGQ_BUF_LEN;
+ 	ctrl->rx_base = dma_alloc_coherent(dev, size, &ctrl->rx_phys_base,
+ 					   GFP_KERNEL);
+@@ -691,6 +710,12 @@ static int qcom_slim_ngd_init_rx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
+ 		ret = -ENOMEM;
+ 		goto rel_rx;
+ 	}
++	SPX_STEP(ctrl, "rx: buffers at DMA address %pad", &ctrl->rx_phys_base);
++
++	if (spx_stop == 3) {
++		SPX_STEP(ctrl, "stopping before starting rx DMA (spx_stop=3)");
++		return -EAGAIN;
++	}
+ 
+ 	ret = qcom_slim_ngd_post_rx_msgq(ctrl);
+ 	if (ret) {
+@@ -714,6 +739,7 @@ static int qcom_slim_ngd_init_tx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
+ 	int ret = 0;
+ 	int size;
+ 
++	SPX_STEP(ctrl, "tx: requesting DMA channel");
+ 	ctrl->dma_tx_channel = dma_request_chan(dev, "tx");
+ 	if (IS_ERR(ctrl->dma_tx_channel)) {
+ 		dev_err(dev, "Failed to request TX dma channel");
+@@ -730,6 +756,7 @@ static int qcom_slim_ngd_init_tx_msgq(struct qcom_slim_ngd_ctrl *ctrl)
+ 		goto rel_tx;
+ 	}
+ 
++	SPX_STEP(ctrl, "tx: buffers at DMA address %pad", &ctrl->tx_phys_base);
+ 	spin_lock_irqsave(&ctrl->tx_buf_lock, flags);
+ 	ctrl->tx_tail = 0;
+ 	ctrl->tx_head = 0;
+@@ -1148,11 +1175,23 @@ static int qcom_slim_ngd_exit_dma(struct qcom_slim_ngd_ctrl *ctrl)
+ 
+ static void qcom_slim_ngd_setup(struct qcom_slim_ngd_ctrl *ctrl)
+ {
+-	u32 cfg = readl_relaxed(ctrl->ngd->base);
++	u32 cfg;
++
++	SPX_STEP(ctrl, "setup: reading NGD config register");
++	cfg = readl_relaxed(ctrl->ngd->base);
++	SPX_STEP(ctrl, "setup: NGD config 0x%08x", cfg);
++
++	if (spx_stop == 2) {
++		SPX_STEP(ctrl, "stopping before DMA setup (spx_stop=2)");
++		return;
++	}
+ 
+ 	if (ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN ||
+-		ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP)
++		ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP) {
++		SPX_STEP(ctrl, "setup: initialising DMA (BAM)");
+ 		qcom_slim_ngd_init_dma(ctrl);
++		SPX_STEP(ctrl, "setup: DMA initialised");
++	}
+ 
+ 	/* By default enable message queues */
+ 	cfg |= NGD_CFG_RX_MSGQ_EN;
+@@ -1181,19 +1220,30 @@ static int qcom_slim_ngd_power_up(struct qcom_slim_ngd_ctrl *ctrl)
+ 
+ 	if (ctrl->state == QCOM_SLIM_NGD_CTRL_ASLEEP ||
+ 		ctrl->state == QCOM_SLIM_NGD_CTRL_DOWN) {
++		SPX_STEP(ctrl, "sending QMI power request to the ADSP");
+ 		ret = qcom_slim_qmi_power_request(ctrl, true);
+ 		if (ret) {
+ 			dev_err(ctrl->dev, "SLIM QMI power request failed:%d\n",
+ 					ret);
+ 			return ret;
+ 		}
++		SPX_STEP(ctrl, "QMI power request accepted");
+ 	}
+ 
++	if (spx_stop == 1) {
++		SPX_STEP(ctrl, "stopping before first register read (spx_stop=1)");
++		return -EAGAIN;
++	}
++
++	SPX_STEP(ctrl, "reading version register at %p", ctrl->base);
+ 	ctrl->ver = readl_relaxed(ctrl->base);
++	SPX_STEP(ctrl, "version register 0x%08x", ctrl->ver);
+ 	/* Version info in 16 MSbits */
+ 	ctrl->ver >>= 16;
+ 
++	SPX_STEP(ctrl, "reading NGD_STATUS");
+ 	laddr = readl_relaxed(ngd->base + NGD_STATUS);
++	SPX_STEP(ctrl, "NGD_STATUS 0x%08x", laddr);
+ 	if (laddr & NGD_LADDR) {
+ 		/*
+ 		 * external MDM restart case where ADSP itself was active framer
+@@ -1328,7 +1378,12 @@ static int qcom_slim_ngd_runtime_resume(struct device *dev)
+ static int qcom_slim_ngd_enable(struct qcom_slim_ngd_ctrl *ctrl, bool enable)
+ {
+ 	if (enable) {
+-		int ret = qcom_slim_qmi_init(ctrl, false);
++		int ret;
++
++		SPX_STEP(ctrl, "connecting to the ADSP SLIMbus QMI service");
++		ret = qcom_slim_qmi_init(ctrl, false);
++		if (!ret)
++			SPX_STEP(ctrl, "QMI select-instance accepted (ADSP is master)");
+ 
+ 		if (ret) {
+ 			dev_err(ctrl->dev, "qmi init fail, ret:%d, state:%d\n",
+@@ -1452,6 +1507,7 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
+ 	struct qcom_slim_ngd_ctrl *ctrl;
+ 
+ 	ctrl = container_of(work, struct qcom_slim_ngd_ctrl, ngd_up_work);
++	SPX_STEP(ctrl, "ADSP audio domain up, waiting for SLIMbus QMI service (spx_stop=%d)", spx_stop);
+ 
+ 	/* Make sure qmi service is up before continuing */
+ 	if (!wait_for_completion_interruptible_timeout(&ctrl->qmi_up,
+@@ -1459,6 +1515,7 @@ static void qcom_slim_ngd_up_worker(struct work_struct *work)
+ 		dev_err(ctrl->dev, "QMI wait timeout\n");
+ 		return;
+ 	}
++	SPX_STEP(ctrl, "SLIMbus QMI service found");
+ 
+ 	mutex_lock(&ctrl->ssr_lock);
+ 	qcom_slim_ngd_enable(ctrl, true);
