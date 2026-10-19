@@ -1,0 +1,37 @@
+#!/usr/bin/bash
+# Give the Surface Pro X Bluetooth controller (WCN3998) a public address.
+#
+# The chip has no address of its own; Windows sets one from its driver. Without
+# it Linux registers the controller as "unconfigured" and bluetoothd ignores it.
+#
+# Address source, first match wins:
+#   1. /etc/surface-pro-x/bluetooth-address  (e.g. the address Windows uses)
+#   2. derived from /etc/machine-id: stable per installation, marked as a
+#      locally administered unicast address
+set -u
+INDEX="${1:-0}"
+CONF=/etc/surface-pro-x/bluetooth-address
+
+if [ -r "$CONF" ]; then
+    ADDR="$(tr -d ' \t\r\n' < "$CONF")"
+else
+    ADDR="$(sha256sum /etc/machine-id | sed -E 's/^(..)(..)(..)(..)(..)(..).*/\1:\2:\3:\4:\5:\6/' | sed -E 's/^(.)./\12/')"
+fi
+
+if ! printf '%s' "$ADDR" | grep -Eq '^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$'; then
+    echo "surface-pro-x-bt-address: invalid address '$ADDR'" >&2
+    exit 1
+fi
+
+# The controller finishes its firmware download a second or two after hci0
+# appears; retry until the kernel lists it as a configured controller.
+for _ in $(seq 1 30); do
+    if btmgmt info 2>/dev/null | grep -q "^hci${INDEX}:"; then
+        echo "surface-pro-x-bt-address: hci${INDEX} is configured"
+        exit 0
+    fi
+    btmgmt --index "$INDEX" public-addr "$ADDR" >/dev/null 2>&1
+    sleep 1
+done
+echo "surface-pro-x-bt-address: hci${INDEX} still unconfigured" >&2
+exit 1

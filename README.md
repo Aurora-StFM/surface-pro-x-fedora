@@ -22,9 +22,12 @@ The kit packages all of this the Fedora way, as signed RPMs plus a few integrati
 | Display and GPU acceleration, battery status, Type Cover keyboard and touchpad | Works |
 | WiFi | Works |
 | Touchscreen | Single-touch works; multitouch and pen need [iptsd](https://github.com/linux-surface/iptsd) |
-| Bluetooth | The firmware loads, but it does not work yet (under investigation) |
+| Bluetooth | Works with `surface-pro-x-support` 1.7 or later, which gives the controller an address at boot (see below) |
 | Audio | **Partly working, experimental.** See [Audio](#audio-experimental) |
-| Cameras, LTE, sensors | Not working yet. See `docs/hardware-findings.md` |
+| Screen rotation (accelerometer) | Works with kernel-spx 6.18.3-7 or later and `tools/setup-sensors.sh`. See [Sensors](#sensors-screen-rotation) |
+| Compass | Works on its own, but not together with the accelerometer yet |
+| Ambient light, proximity | Not working yet |
+| Cameras, LTE | Not working yet. See `docs/hardware-findings.md` |
 | Known issue | The screen sometimes stays black after boot (display handover). Hold the power button to restart. |
 
 ## What's in the kit
@@ -215,6 +218,41 @@ Only 16/16 works on this hardware. Every other combination stalls playback.
 
 `kernel/debug-patches/` holds the step-by-step SLIMbus/BAM logging used during bring-up. It is not applied by default; copy a patch into `kernel/patches/` to use it.
 
+## Sensors (screen rotation)
+
+The accelerometer, gyroscope and magnetometer are on the Qualcomm sensor DSP (SLPI), not on the main processor. Getting them working takes three parts:
+
+- **Kernel:** patch `0004` adds the SLPI to the device tree and enables FastRPC. Both are included in kernel-spx 6.18.3-7 and later.
+- **Files from Windows:** the DSP firmware `qcslpi8180.mbn` and the sensor configuration JSONs. Windows is on another drive, so copy these before you start (see below).
+- **Userspace:**
+  - [hexagonrpcd](https://github.com/linux-msm/hexagonrpc) serves the configuration to the DSP.
+  - [libssc](https://codeberg.org/DylanVanAssche/libssc) reads the sensors.
+  - [iio-sensor-proxy](https://gitlab.freedesktop.org/hadess/iio-sensor-proxy) is built with `-Dssc-support=enabled`, and KDE reads it.
+
+**Copy files from Windows.** Do this once, in an administrator PowerShell, with a USB stick on `D:`:
+
+```powershell
+$dst = "D:\spx-windows-drivers"
+$repo = "$env:SystemRoot\System32\DriverStore\FileRepository"
+Get-ChildItem $repo -Directory | Where-Object { $_.Name -match '^(qc|surfaceprox|surface)' } |
+  ForEach-Object { robocopy $_.FullName (Join-Path $dst $_.Name) /E /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null }
+```
+
+**Set up on the Surface:**
+
+```bash
+./tools/setup-sensors.sh /run/media/$USER/<stick>/spx-windows-drivers
+sudo reboot
+```
+
+The script builds the three projects into `/usr/local`, so Fedora's packages are untouched. It also installs the udev rule, an iio-sensor-proxy drop-in and `spx-sensors.service`, which starts the DSP and hexagonrpcd at boot. Undo it with `./tools/setup-sensors.sh --remove`.
+
+Known limits:
+
+- **Accelerometer only for now.** With the compass also enabled, the accelerometer stops delivering data.
+- **The tilt direction may be inverted.** This does not affect screen rotation.
+- **The DSP cannot save its registry.** hexagonrpcd is read-only, so the DSP logs refused writes and works from its in-memory registry.
+
 ## Updates
 
 - **Fedora packages:** `sudo dnf upgrade` works normally. Fedora's own kernel is excluded.
@@ -229,7 +267,8 @@ Only 16/16 works on this hardware. Every other combination stalls playback.
 | Stops right after the GRUB menu | In GRUB, press `e` and check the entry has `devicetree /dtb-…/qcom/sc8180x-surface-pro-x.dtb` and `efi=novamap clk_ignore_unused`. Fedora 44's GRUB starts the kernel through the firmware (`LoadImage`), so the [executable-memory problem](https://github.com/linux-surface/grub-image-aarch64) that older GRUB builds had on this device shouldn't happen. If it still hangs at "Loading kernel", boot with the [linux-surface GRUB image](https://github.com/linux-surface/grub-image-aarch64) and report back. |
 | Black screen after boot messages | Known display handover issue. Restart and retry. If it happens every time, add `module_blacklist=msm` to the kernel arguments to stay on the basic framebuffer while debugging. |
 | No WiFi | `journalctl -b -u rmtfs -u tqftpserv` and `sudo dmesg \| grep -iE 'q6v5\|mpss\|ath10k'`. Check that `/usr/lib/firmware/qcom/msft/surface/pro-x-sq2/` exists. |
-| No Bluetooth | `sudo dmesg \| grep -i qca`, `bluetoothctl show`, `sudo btmgmt info`. The firmware package provides the `crnv01`/`crbtfw01` links the [wiki](https://github.com/linux-surface/surface-pro-x/wiki/Bluetooth) describes. |
+| No Bluetooth, "No default controller available" | The WCN3998 has no address of its own, so Linux leaves it unconfigured. `surface-pro-x-support` 1.7 sets one at boot. Check with `systemctl status surface-pro-x-bt-address`. To use the address Windows uses (Device Manager → Bluetooth adapter → Properties → Advanced → Address), write it to `/etc/surface-pro-x/bluetooth-address`. Manual one-off fix: `sudo btmgmt --index 0 public-addr XX:XX:XX:XX:XX:XX`. |
+| No Bluetooth, other | `sudo dmesg \| grep -i qca`. The firmware package provides the `crnv01`/`crbtfw01` links the [wiki](https://github.com/linux-surface/surface-pro-x/wiki/Bluetooth) describes. Also check `bluetoothctl show` and `sudo btmgmt info`. |
 | Only single-touch, no pen | Install [iptsd](https://github.com/linux-surface/iptsd) (build from source with meson). |
 | UEFI entry missing after a firmware update | Pick the drive from the Volume Down boot menu, then run `sudo efibootmgr --create --disk /dev/nvme0n1 --part <ESP#> --label "Fedora (Surface Pro X)" --loader '\EFI\fedora\shimaa64.efi'`. |
 

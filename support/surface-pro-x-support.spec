@@ -15,6 +15,9 @@ Source8:        surface-pro-x-diag
 Source9:        SurfaceProX.conf
 Source10:       HiFi.conf
 Source11:       66-surface-pro-x-audio.rules
+Source12:       surface-pro-x-bt-address
+Source13:       surface-pro-x-bt-address.service
+Source14:       67-surface-pro-x-bluetooth.rules
 
 Requires:       systemd-udev
 Requires:       dracut
@@ -26,6 +29,7 @@ Requires:       util-linux
 Requires:       dosfstools
 Requires:       e2fsprogs
 Requires:       alsa-ucm
+Requires:       bluez
 
 %description
 Glue that makes Fedora boot and run on the Surface Pro X with kernel-spx:
@@ -37,6 +41,7 @@ Glue that makes Fedora boot and run on the Surface Pro X with kernel-spx:
 - surface-pro-x-install, which copies a USB-booted system next to Windows
 - surface-pro-x-diag, which collects hardware diagnostics for bring-up work
 - ALSA UCM profile for the speakers and headset jack (experimental)
+- Bluetooth address setup for the WCN3998 controller, which has none of its own
 
 %prep
 
@@ -49,6 +54,9 @@ install -Dm0644 %{SOURCE3} %{buildroot}/usr/lib/systemd/system/rmtfs.service.d/9
 install -Dm0755 %{SOURCE4} %{buildroot}/usr/libexec/surface-pro-x/rmtfs-prepare
 install -Dm0644 %{SOURCE5} %{buildroot}/usr/lib/udev/rules.d/65-surface-pro-x-rmtfs.rules
 install -Dm0644 %{SOURCE11} %{buildroot}/usr/lib/udev/rules.d/66-surface-pro-x-audio.rules
+install -Dm0755 %{SOURCE12} %{buildroot}/usr/libexec/surface-pro-x/surface-pro-x-bt-address
+install -Dm0644 %{SOURCE13} %{buildroot}/usr/lib/systemd/system/surface-pro-x-bt-address.service
+install -Dm0644 %{SOURCE14} %{buildroot}/usr/lib/udev/rules.d/67-surface-pro-x-bluetooth.rules
 install -Dm0644 %{SOURCE6} %{buildroot}/usr/lib/systemd/system-preset/50-surface-pro-x.preset
 install -Dm0755 %{SOURCE7} %{buildroot}/usr/sbin/surface-pro-x-install
 install -Dm0755 %{SOURCE8} %{buildroot}/usr/sbin/surface-pro-x-diag
@@ -78,6 +86,9 @@ fi
 /usr/libexec/surface-pro-x/rmtfs-prepare
 /usr/lib/udev/rules.d/65-surface-pro-x-rmtfs.rules
 /usr/lib/udev/rules.d/66-surface-pro-x-audio.rules
+/usr/lib/udev/rules.d/67-surface-pro-x-bluetooth.rules
+/usr/libexec/surface-pro-x/surface-pro-x-bt-address
+/usr/lib/systemd/system/surface-pro-x-bt-address.service
 /usr/lib/systemd/system-preset/50-surface-pro-x.preset
 /usr/sbin/surface-pro-x-install
 /usr/sbin/surface-pro-x-diag
@@ -93,6 +104,9 @@ fi
 - udev: keep the SLIMbus controller, the codec's SoundWire link and the
   WSA881x speaker amplifiers out of runtime suspend (they drop off the bus
   between streams otherwise)
+- Bluetooth: set a public address on the WCN3998 controller at boot
+  (/etc/surface-pro-x/bluetooth-address, or derived from the machine id);
+  without one the controller stays unconfigured and Bluetooth is missing
 
 * Sat Oct 17 2026 Surface Pro X Fedora kit <spx@localhost> - 1.6-1
 - dracut: revert the 1.5 change; starting the ADSP locks up the machine, so

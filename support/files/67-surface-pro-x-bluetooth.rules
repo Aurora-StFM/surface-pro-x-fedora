@@ -1,0 +1,3 @@
+# The WCN3998 Bluetooth controller has no address of its own; set one as soon
+# as it appears (see surface-pro-x-bt-address).
+ACTION=="add", SUBSYSTEM=="bluetooth", KERNEL=="hci0", TAG+="systemd", ENV{SYSTEMD_WANTS}+="surface-pro-x-bt-address.service"

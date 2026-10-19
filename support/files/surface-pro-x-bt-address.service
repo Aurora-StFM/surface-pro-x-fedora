@@ -1,0 +1,7 @@
+[Unit]
+Description=Set the Surface Pro X Bluetooth controller address
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/surface-pro-x/surface-pro-x-bt-address 0

@@ -148,3 +148,58 @@ All three sensors already have Linux drivers, and they're the same sensors other
 - Swapping the WSA SD_N GPIOs made things worse (init failures, write overflows, reversed attach order). The C630 assignment (left wcdgpio 1, right wcdgpio 2) is correct.
 - Keeping the codec's SoundWire master out of runtime PM (`wcd934x-soundwire*/power/control = on`) stops the WSA UNATTACHED/re-attach cycles.
 - Open issue: speaker output is about 40-50 dB too low at the WSA input, and coarse when digitally boosted. Not explained by PA gain, the compander or the boost. Remaining suspects: SoundWire frame/port parameters (port collision and CMD errors seen) and DSP-side processing (no ACDB calibration).
+
+## Bluetooth
+
+- The WCN3998 (QCA, SoC version 0x40010224) loads crbtfw01.tlv and crnv01.bin fine, but it has no public BD address. `btmgmt info` lists 0 controllers and bluetoothctl reports "No default controller available".
+- Setting an address with `btmgmt --index 0 public-addr` makes it work (confirmed 18 Oct 2026).
+- Support 1.7 does this at boot through a udev rule and the oneshot surface-pro-x-bt-address.service. The address comes from /etc/surface-pro-x/bluetooth-address, or is derived from /etc/machine-id as a locally administered unicast address.
+- The cleaner long-term fix would be a `local-bd-address` in the device tree filled by the bootloader, but the Surface UEFI doesn't do that.
+
+## Quick checks of the linux-surface "to be done" list (18 Oct 2026, SQ1 with LTE)
+
+| Issue | Result |
+|---|---|
+| #29 Suspend | `s2idle` only (`mem_sleep: [s2idle]`). Suspend and resume work. |
+| #41 UEFI ResetSystem | Reboot and power-off both work, many times over. |
+| #37 TrEE | qseecom 0x1401001 found, `qcom.tz.uefisecapp` client set up, efivarfs mounted rw with 96 variables. UEFI variable access works. |
+| #38 Sensors | `apds9960` (ambient light/proximity) shows up as an IIO device, but `monitor-sensor` reports nothing. The motion sensors live behind the SLPI sensor DSP, which has no remoteproc node. |
+| #23 Cameras | No video or media devices; CAMSS and the sensors are not in the device tree. |
+| #27 External displays | Only eDP-1; the DP controllers are disabled in the device tree. |
+| #22 LTE | The modem DSP runs and offers a full QMI set over QRTR: WDS 1, NAS 3, DMS 2, UIM 11, WMS 5, Voice 9, IPA control 49, Location 16. ModemManager finds no modem: there is no QRTR control port or IPA data path yet. |
+| #39 GPS | The modem offers the QMI Location service (16, "PDS v2"). |
+
+## Sensors (SLPI), from the Windows driver store (19 Oct 2026)
+
+- **Windows reads:** accelerometer, gyroscope, compass/magnetometer, inclinometer, orientation and light, all through `\_SB.SEN2` (QCOM049F, "All-Ways Aware Hub"). The ambient light sensor is `\_SB.I2C2.ACSD` (MSHW0184, the apds9960 on i2c2, which Linux already sees).
+- **Chips,** from the `surfaceprox_sensorsconfig` registry JSONs:
+  - ST LSM6DSO (accelerometer and gyroscope)
+  - AKM AK991x (magnetometer)
+  - ADI ADUX1080 (display-side proximity)
+- **Firmware:** `qcslpi8180.mbn` from `surfaceprox_subextscss`. It is a relocatable ELF (segment flags bit 27) spanning 0x97300000-0x98700000 (20 MiB), the same as SM8150's `slpi_mem`. The Surface DT already reserves `scss_mem` at 0x99000000 with exactly that size, so the image is loaded there.
+- **Device tree:** `0004-…-Add-SLPI-sensor-DSP.patch` adds `remoteproc_slpi` at 0x02400000 using the SM8150 wiring:
+  - wdog SPI 494, glink SPI 170, apss_shared 24
+  - LCX/LMX power domains
+  - smp2p-slpi already present in sc8180x.dtsi, with the same SPI 172 and mbox 26 as SM8150
+  
+  The SM8150 ADSP/CDSP wiring is identical in sc8180x.dtsi, which supports this assumption. fastrpc is left out until the DSP boots.
+- **Plan after the DSP boots:** fastrpc (sdsp), then hexagonrpcd serving the sensor registry/config JSONs, then libssc + iio-sensor-proxy, as postmarketOS does on SDM845 phones.
+- **19 Oct 2026, the SLPI boots.** "remote processor slpi is now up" with the 0004 DT and the firmware loaded into scss_mem. No freeze, and the other DSPs are unaffected.
+  - qrtr node 9 offers service 400 (Snapdragon Sensor Core) and 4100, plus the usual SSCTL, servreg, TMD and CoreSight services.
+  - The IORT entry `\_SB.SEN1` maps 0x5a1-0x5a3, identical to SM8150's sdsp fastrpc compute banks, so 0004 now adds the sdsp fastrpc node with those IDs. CONFIG_QCOM_FASTRPC=m was added to fedora.config.
+  - Next: hexagonrpcd on /dev/fastrpc-sdsp to serve the sensor registry/config JSONs from the Windows package, then libssc and iio-sensor-proxy (ssc).
+- **19 Oct 2026, the IMU works on Linux.** Setup:
+  - SLPI running
+  - hexagonrpcd (linux-msm/hexagonrpc 0.5) on /dev/fastrpc-sdsp with `-d sdsp -s`
+  - root /usr/share/qcom/sc8180x/Microsoft/SurfaceProX containing:
+    - sensors/config/ (the Windows JSONs and config_list.txt)
+    - an empty sensors/registry/
+    - socinfo/ (hw_platform CLS, soc_id 340, … from the Windows package)
+  
+  `libssc` 0.4.4 `ssccli`:
+  - accelerometer: |g| about 9.8 m/s², follows tilt
+  - magnetometer: about 128 µT, uncalibrated
+  - proximity and light: "Unable to initialize … UNKNOWN". The ALS is the apds9960 on i2c2, not on the SSC. The ADUX1080 isn't reachable through libssc's proximity type yet.
+  
+  The SLPI parses the configs and repeatedly tries to write registry files under /persist/sensors/registry/registry/ (hexagonrpcd is read-only), but the sensors work from its in-memory registry anyway.
+- **Next:** iio-sensor-proxy built with libssc support (screen rotation in KDE), a hexagonrpcd service, SLPI autostart, and packaging (hexagonrpc, libssc) in the kit.

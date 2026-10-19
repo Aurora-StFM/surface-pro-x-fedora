@@ -83,6 +83,11 @@ done
 %ghost %dir /boot/dtb-%{kver}
 
 %changelog
+* Mon Oct 19 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
+- Device tree: sensor DSP (SLPI) with its FastRPC channel (sdsp); enable
+  CONFIG_QCOM_FASTRPC. Accelerometer and magnetometer work with hexagonrpcd
+  and libssc (tools/setup-sensors.sh)
+
 * Sun Oct 18 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
 - Separate SLIMbus width overrides for the codec channel definition
   (snd_soc_wcd934x.spx_rx_bps) and the ADSP port (q6afe-dai spx_slim_bits)
