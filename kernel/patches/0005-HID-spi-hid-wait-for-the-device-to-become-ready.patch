@@ -1,0 +1,47 @@
+diff --git a/drivers/hid/spi-hid/spi-hid-core.c b/drivers/hid/spi-hid/spi-hid-core.c
+index 38e21327c..1c01e7f99 100755
+--- a/drivers/hid/spi-hid/spi-hid-core.c
++++ b/drivers/hid/spi-hid/spi-hid-core.c
+@@ -1205,6 +1205,23 @@ static int spi_hid_ll_parse(struct hid_device *hid)
+ 	return ret;
+ }
+ 
++/*
++ * Opening the device powers it up and resets it; it becomes ready once it
++ * has answered the reset (a few milliseconds later). Requests sent in that
++ * window used to fail with -ENODEV, so a daemon that opens the hidraw node
++ * and queries a feature report right away (iptsd) never got going unless
++ * another user kept the device open. Give it up to two seconds.
++ */
++static bool spi_hid_wait_ready(struct spi_hid *shid)
++{
++	int i;
++
++	for (i = 0; i < 200 && !READ_ONCE(shid->ready); i++)
++		msleep(10);
++
++	return READ_ONCE(shid->ready);
++}
++
+ static int spi_hid_ll_raw_request(struct hid_device *hid,
+ 		unsigned char reportnum, __u8 *buf, size_t len,
+ 		unsigned char rtype, int reqtype)
+@@ -1214,7 +1231,7 @@ static int spi_hid_ll_raw_request(struct hid_device *hid,
+ 	struct device *dev = &spi->dev;
+ 	int ret;
+ 
+-	if (!shid->ready) {
++	if (!spi_hid_wait_ready(shid)) {
+ 		dev_err(&shid->spi->dev, "%s called in unready state\n", __func__);
+ 		return -ENODEV;
+ 	}
+@@ -1274,6 +1291,9 @@ static int spi_hid_ll_output_report(struct hid_device *hid,
+ 		.content = &buf[1],
+ 	};
+ 
++	/* Not under shid->lock: the work that sets ready takes it. */
++	spi_hid_wait_ready(shid);
++
+ 	mutex_lock(&shid->lock);
+ 	if (!shid->ready) {
+ 		dev_err(dev, "%s called in unready state\n", __func__);

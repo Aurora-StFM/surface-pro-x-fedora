@@ -83,6 +83,21 @@ done
 %ghost %dir /boot/dtb-%{kver}
 
 %changelog
+* Sat Oct 24 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
+- wcd934x: enable the speaker smart boost clock with bit 4 of
+  BOOST_PATH_CTL (as in lpass-wsa-macro) instead of bit 0; the register
+  read back 0x00 during playback, so the WSA881x boost control was never
+  driven (candidate cause of the very low speaker level)
+
+* Mon Oct 19 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
+- spi-hid: wait up to two seconds for the touchscreen to become ready
+  instead of failing requests with -ENODEV right after it is opened (iptsd
+  could not start once nothing else kept the touchscreen open)
+- Device tree: lid switch (Hall sensor for the Type Cover, TLMM GPIO 121,
+  as in Windows' ACPI LID0); closing the cover can suspend, opening wakes
+- pinctrl-sc8180x: enable the PDC dual-edge wake IRQ workaround (as on
+  SM8150/SDM845); without it the lid switch only saw the cover opening
+
 * Mon Oct 19 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
 - Device tree: sensor DSP (SLPI) with its FastRPC channel (sdsp); enable
   CONFIG_QCOM_FASTRPC. Accelerometer and magnetometer work with hexagonrpcd

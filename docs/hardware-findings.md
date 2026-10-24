@@ -203,3 +203,37 @@ All three sensors already have Linux drivers, and they're the same sensors other
   
   The SLPI parses the configs and repeatedly tries to write registry files under /persist/sensors/registry/registry/ (hexagonrpcd is read-only), but the sensors work from its in-memory registry anyway.
 - **Next:** iio-sensor-proxy built with libssc support (screen rotation in KDE), a hexagonrpcd service, SLPI autostart, and packaging (hexagonrpc, libssc) in the kit.
+
+## Touchscreen and pen (iptsd)
+
+- Digitizer: `hid-over-spi` on spi0.0 (SPI1, IRQ GPIO 122), HID ID `001C:045E:0996`, exposed as one hidraw node plus several `spi 045E:0996` input devices (single-touch fallback mode, including a "Stylus" one).
+- iptsd 3.1.1 (built as an RPM on the device) recognises it, reads the screen size from the device's metadata and runs in touchscreen mode. It creates "IPTSD Virtual Touchscreen/Stylus 045E:0996" uinput devices on the virtual bus (0x06).
+- With iptsd running, the native single-touch devices still deliver events, so every contact was counted twice. Fixed by `LIBINPUT_IGNORE_DEVICE` on the bus 0x1c event devices.
+- spi-hid powers the digitizer down on the last close and, on the next open, rejects raw requests (`spi_hid_ll_raw_request called in unready state`, -ENODEV) until the digitizer has answered its reset. iptsd and `iptsd-check-device` send `HIDIOCGFEATURE` straight after opening, so:
+  - iptsd's udev check fails at boot, its `iptsd@.service` is never started, and the `dev-hidrawN.device` unit is not registered (starting `iptsd@` by hand stops immediately because of `BindsTo=`).
+  - It only worked at first because libinput kept the native input devices open; hiding them removed that.
+  - Workaround: `surface-pro-x-touch@.service` holds the hidraw node open, waits for `/sys/bus/spi/devices/spi0.0/ready`, then execs iptsd. Kernel patch 0005 makes spi-hid wait up to 2 s for ready.
+- Stopping iptsd switches the digitizer back to single-touch mode. Running two iptsd instances on the same node made the digitizer send reports larger than the driver's buffer (`Bad body length 211 > 124`), after which spi-hid needed a power cycle (a warm reboot was not enough at least once).
+
+## Lid switch (Type Cover closed)
+
+- ACPI: `\_SB.LID0` (PNP0C0D). `_LID` returns `\_SB.GIO0.LIDR`, a GpioIo read of TLMM pin 0x79 (121), no pull; 1 = open. The change interrupt is `_AEI` pin 0x140 (edge, both, SharedAndWake), whose `_EVT` re-reads LIDR and notifies LID0.
+- Same pin as the SC8180X reference design and the Lenovo Flex 5G (both use `gpio-keys` with `SW_LID` on `&tlmm 121 GPIO_ACTIVE_LOW`). GPIO 121 has a PDC wake mapping (PDC 89), so it can wake from suspend.
+- Kernel patch 0006 adds that `gpio-keys` node (wake on open: `EV_ACT_DEASSERTED`).
+- Test with the DTB alone: the `Lid` input device appears and GPIO 121 follows the cover (`high` open, `low` closed; the Type Cover's own KIP state reads `closed` at the same time), but no `SW_LID` events arrive. `/proc/interrupts` showed one interrupt per close/open cycle: GPIO 121 is routed through the PDC as a wake interrupt, and the SC8180X PDC (like SM8150/SDM845) only triggers on one edge of a dual-edge interrupt. pinctrl-sc8180x lacks `wakeirq_dual_edge_errata`, which makes pinctrl-msm switch the PDC polarity after each edge. Kernel patch 0007 sets it.
+
+## Speaker level, 24 Oct 2026 (kernel 6.18.3-8)
+
+- Codec pins (WCD gpiochip, 5 lines; 1 and 2 are the WSA SD_N lines) 0, 3 and 4 set high during playback: no change. The Flex 5G's "speaker battery via wcdgpio 4" switch is not what's missing here.
+- Register dump during playback (tools/audio-dump.sh):
+  - SoundWire: frame 48x16, master and slave port parameters agree (DP1 DAC, DP2 COMP, DP3 BOOST per amplifier, C630 values). Both amplifiers have DAC/COMP/BOOST ports on, PA 12 dB, smart boost preset 7.5 V.
+  - Codec RX7/RX8: interpolators on at 48 kHz, digital volumes 0 dB, compander on, smart boost enabled in RX7/8_RX_PATH_CFG1 bit 0, **but CDC_BOOST0/1_BOOST_PATH_CTL (0x0c19/0x0c21) read 0x00**. The DAPM supply "SBOOSTn_CLK" in wcd934x.c uses bit 0; the clock enable is bit 4 (WCD934X_BOOST_PATH_CLK_EN_MASK, and the same block in lpass-wsa-macro enables BIT(4)). Kernel patch 0008 fixes the bit.
+  - Reads from the WSA881x over SoundWire fail in this boot ("read FIFO underflow", "SWR CMD error", once "bus clash"), and the first stream prepare failed once ("DPN_PortCtrl register write failed", -5) before a retry worked. Writes are not acknowledged either, so configuration writes may be lost. Second open issue after 0008.
+- **Cause of the low level found (24 Oct):** `speaker-test -D plughw:0,0` (S16_LE) plays at full, normal volume. PipeWire opened the same PCM with S24_LE (q6asm-dai offers S16_LE and S24_LE). This DSP firmware evidently treats the S24_LE container differently from the driver's assumption (the level drop is about 8 bits, -48 dB, with the coarse, crackly sound of the remaining low bits). Forcing PipeWire to S16LE (WirePlumber `audio.format`) gives normal levels. Support 1.9 ships that rule. A kernel-side fix would be to drop S24_LE from q6asm-dai for this platform or to send the 24-bit media format the firmware expects; not done.
+
+## Graphics: GTK 4 corruption (24 Oct 2026)
+
+- GTK 4.22.5 apps (e.g. Riff) draw with torn, displaced tiles. GTK 4 defaults to its Vulkan renderer; the device is "Turnip Adreno (TM) 680", Mesa 26.2.5. With `GSK_RENDERER=ngl` (OpenGL, freedreno "FD680", GL 4.6) they render correctly. Qt/KDE apps use OpenGL and were never affected.
+- `TU_DEBUG=sysmem` (turnip renders without GMEM tiling) also fixes GTK 4 with Vulkan; `TU_DEBUG=noubwc` does not. So the corruption comes from turnip's GMEM/bin rendering on the a680. Worth reporting to Mesa.
+- A system-wide `GSK_RENDERER=ngl` (environment.d) was tried and taken out again: media playback stopped working at the same time (not yet confirmed as the cause).
+- Vesktop (Electron, Flatpak) shows the same kind of displaced tiles in the server banner. Not fixed by `FD_MESA_DEBUG=noubwc`/`nogmem`, `TU_DEBUG=sysmem` or `--disable-gpu-rasterization`; `--disable-gpu-compositing` fixes it but is very slow. Next to try: `--disable-features=WaylandOverlayDelegation`, `--ozone-platform=x11`.

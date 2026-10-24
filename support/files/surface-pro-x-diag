@@ -157,6 +157,20 @@ for h in /sys/bus/hid/devices/*; do
 done
 grab devices/iio.txt /sys/bus/iio/devices/*/name
 
+# ---- touchscreen and pen (spi-hid + iptsd) -----------------------------------------------
+run touch/touch.txt sh -c "lsmod | grep -E '^(spi_hid|uinput|hid_multitouch)'"
+for h in /sys/class/hidraw/hidraw*; do
+    [ -e "$h" ] || continue
+    run touch/touch.txt readlink -f "$h/device"
+    grab touch/touch.txt "$h/device/uevent"
+    if have iptsd-check-device; then run touch/touch.txt iptsd-check-device "/dev/$(basename "$h")"; fi
+done
+grab touch/touch.txt /etc/iptsd.conf /etc/iptsd.d/* /usr/share/iptsd/*surface-pro-x*
+if have rpm; then run touch/touch.txt rpm -q iptsd; fi
+run touch/touch.txt systemctl list-units --no-pager --all 'iptsd@*'
+run touch/iptsd-log.txt journalctl -b 0 -u 'iptsd@*' --no-pager
+run touch/kernel-spi-hid.txt sh -c "journalctl -k -b 0 --no-pager | grep -iE 'spi.hid|spi_hid|hidraw|geni.*spi|input:'"
+
 # ---- display and GPU ------------------------------------------------------------------
 for c in /sys/class/drm/card*-*; do
     [ -d "$c" ] && grab display/connectors.txt "$c/status" "$c/enabled" "$c/modes"

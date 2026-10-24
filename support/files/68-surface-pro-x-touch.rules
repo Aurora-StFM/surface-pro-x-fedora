@@ -1,0 +1,13 @@
+# Surface Pro X touchscreen and pen with iptsd. Only active while iptsd is
+# installed; without it the digitizer's single-touch mode is used as is.
+
+# Start iptsd through surface-pro-x-touch@.service, which holds the
+# touchscreen open and waits until spi-hid reports it ready before starting
+# iptsd. iptsd's own rule (50-iptsd.rules) probes the device right after
+# opening it and fails on this transport, so its wants are replaced here.
+ACTION=="add", SUBSYSTEM=="hidraw", SUBSYSTEMS=="hid", KERNELS=="001C:045E:0996.*", TEST=="/usr/bin/iptsd", TAG+="systemd", ENV{SYSTEMD_WANTS}="surface-pro-x-touch@%k.service"
+
+# iptsd provides the touch and pen input ("IPTSD Virtual ..." devices on the
+# virtual bus). Hide the digitizer's own single-touch devices (SPI bus 0x1c)
+# from libinput, or every contact is reported twice.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", TEST=="/usr/bin/iptsd", ATTRS{id/bustype}=="001c", ATTRS{id/vendor}=="045e", ATTRS{id/product}=="0996", ENV{LIBINPUT_IGNORE_DEVICE}="1"

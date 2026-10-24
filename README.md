@@ -4,6 +4,8 @@ An unofficial kit that builds Fedora KDE Plasma for the Microsoft Surface Pro X 
 
 > **About this project.** This kit was written with an AI assistant (Claude) and tested by one person on one Surface Pro X SQ1. It is **experimental**. It is **not affiliated with or endorsed by** the [linux-surface](https://github.com/linux-surface) project, whose kernel and firmware work it packages. Please don't report problems with this kit to linux-surface. Open an issue here instead. Read the scripts before running them as root.
 
+> **Fedora.** This is also **not an official Fedora product** and is not affiliated with or endorsed by the Fedora Project. Fedora and the Fedora logo are trademarks of Red Hat, Inc.; the name is used here only to say which distribution the kit builds on. The kit publishes build scripts and add-on packages only, not ready-made disk images: each user builds their own image from the official Fedora image. Systems set up with this kit run a non-Fedora kernel and firmware, so please don't report problems with them to Fedora's Bugzilla or forums.
+
 It reuses the work of the [linux-surface Surface Pro X project](https://github.com/linux-surface/surface-pro-x):
 
 - **Kernel:** the linux-surface `spx/v6.18.3` kernel with the Surface Pro X device tree.
@@ -21,13 +23,15 @@ The kit packages all of this the Fedora way, as signed RPMs plus a few integrati
 | Boot from USB and internal NVMe, GRUB with the device tree | Works |
 | Display and GPU acceleration, battery status, Type Cover keyboard and touchpad | Works |
 | WiFi | Works |
-| Touchscreen | Single-touch works; multitouch and pen need [iptsd](https://github.com/linux-surface/iptsd) |
+| Touchscreen | Single-touch works out of the box. Multitouch and pen need [iptsd](https://github.com/linux-surface/iptsd): run `tools/setup-touch.sh` (testing). See [Touch and pen](#touch-and-pen) |
 | Bluetooth | Works with `surface-pro-x-support` 1.7 or later, which gives the controller an address at boot (see below) |
-| Audio | **Partly working, experimental.** See [Audio](#audio-experimental) |
+| Audio | Speakers work (experimental): kernel-spx 6.18.3-9 and `surface-pro-x-support` 1.9; the DSP is still started by hand. See [Audio](#audio-experimental) |
 | Screen rotation (accelerometer) | Works with kernel-spx 6.18.3-7 or later and `tools/setup-sensors.sh`. See [Sensors](#sensors-screen-rotation) |
 | Compass | Works on its own, but not together with the accelerometer yet |
+| Lid switch (closing the Type Cover) | Testing: kernel-spx 6.18.3-8 or later (device tree patch 0006) |
 | Ambient light, proximity | Not working yet |
 | Cameras, LTE | Not working yet. See `docs/hardware-findings.md` |
+| GTK 4 apps (GNOME apps, Flatpaks) | Can draw with corrupted, displaced tiles (GTK's Vulkan renderer, turnip on the Adreno 680). Per app: `GSK_RENDERER=ngl <app>` or `TU_DEBUG=sysmem`. See `docs/hardware-findings.md`. |
 | Known issue | The screen sometimes stays black after boot (display handover). Hold the power button to restart. |
 
 ## What's in the kit
@@ -187,16 +191,17 @@ The patches in `kernel/patches/` add the audio hardware to the device tree, foll
 
 The SMMU stream IDs come from the Surface's own Windows IORT table. `docs/hardware-findings.md` records where every value comes from and every test result.
 
-**What works:** the ADSP starts, SLIMbus comes up, the codec and both speaker amplifiers are detected, and playback reaches both speakers.
+**What works:** the ADSP starts, SLIMbus comes up, the codec and both speaker amplifiers are detected, and the speakers play at normal volume.
+
+**The speaker level needs `surface-pro-x-support` 1.9 or later.** PipeWire would otherwise send 24-bit audio, which this DSP firmware plays about 48 dB too quietly (and crackly when turned up). The package includes a WirePlumber setting that makes PipeWire use 16-bit. Kernel-spx 6.18.3-9 also fixes the speakers' smart boost clock in the codec driver.
 
 **What does not work yet:**
 
-- **The speaker level is far too low.** You need the volume at 100% with your ear next to the speaker. The amplifier gain, compander, boost and sample-format tests have ruled out the obvious causes; the findings document lists them.
-- **The ADSP does not start automatically yet.** Start it by hand after boot:
+- **The ADSP does not start automatically yet.** Start it after each boot with `./tools/start-audio.sh`, or by hand:
 
 ```bash
 echo on | sudo tee /sys/bus/platform/devices/qcom,slim-ngd*/power/control
-echo start | sudo tee /sys/class/remoteproc/remoteproc2/state
+for r in /sys/class/remoteproc/*; do [ "$(cat $r/name)" = adsp ] && echo start | sudo tee $r/state; done
 sleep 10
 echo on | sudo tee /sys/bus/platform/devices/wcd934x-soundwire*/power/control
 for d in /sys/bus/soundwire/devices/sdw:*:0217:2110:*; do echo on | sudo tee $d/power/control; done
@@ -253,6 +258,20 @@ Known limits:
 - **The tilt direction may be inverted.** This does not affect screen rotation.
 - **The DSP cannot save its registry.** hexagonrpcd is read-only, so the DSP logs refused writes and works from its in-memory registry.
 
+## Touch and pen
+
+Without extra software the touchscreen runs in its single-touch fallback mode. [iptsd](https://github.com/linux-surface/iptsd) from linux-surface switches it to multitouch mode and turns the raw sensor data into finger and pen input (gestures, pinch-to-zoom, palm rejection, pen pressure). On the Surface Pro X it reads the touchscreen through the `spi_hid` driver.
+
+On the Surface, from the kit folder:
+
+```bash
+./tools/setup-touch.sh
+```
+
+It installs iptsd from Fedora if Fedora has it, and otherwise builds an RPM from the upstream release (a few minutes) and installs that, so `sudo dnf remove iptsd` undoes it. It also sets up `surface-pro-x-touch@.service`, which starts iptsd for the touchscreen, and a udev rule that hides the touchscreen's single-touch devices from KDE so a finger isn't counted twice.
+
+iptsd's own automatic start doesn't work here: the touchscreen driver (`spi_hid`) powers the touchscreen down when nobody has it open, and rejects requests for a few milliseconds after it is opened again, which is exactly when iptsd asks for the touchscreen's settings. The service opens the touchscreen first, waits for the driver's `ready` flag, then starts iptsd. kernel-spx 6.18.3-8 also makes the driver wait instead of rejecting the request. `surface-pro-x-support` 1.8 or later recommends iptsd, so it is pulled in automatically wherever a repository provides it. `./tools/setup-touch.sh --check` shows the touchscreen and iptsd state.
+
 ## Updates
 
 - **Fedora packages:** `sudo dnf upgrade` works normally. Fedora's own kernel is excluded.
@@ -269,7 +288,9 @@ Known limits:
 | No WiFi | `journalctl -b -u rmtfs -u tqftpserv` and `sudo dmesg \| grep -iE 'q6v5\|mpss\|ath10k'`. Check that `/usr/lib/firmware/qcom/msft/surface/pro-x-sq2/` exists. |
 | No Bluetooth, "No default controller available" | The WCN3998 has no address of its own, so Linux leaves it unconfigured. `surface-pro-x-support` 1.7 sets one at boot. Check with `systemctl status surface-pro-x-bt-address`. To use the address Windows uses (Device Manager → Bluetooth adapter → Properties → Advanced → Address), write it to `/etc/surface-pro-x/bluetooth-address`. Manual one-off fix: `sudo btmgmt --index 0 public-addr XX:XX:XX:XX:XX:XX`. |
 | No Bluetooth, other | `sudo dmesg \| grep -i qca`. The firmware package provides the `crnv01`/`crbtfw01` links the [wiki](https://github.com/linux-surface/surface-pro-x/wiki/Bluetooth) describes. Also check `bluetoothctl show` and `sudo btmgmt info`. |
-| Only single-touch, no pen | Install [iptsd](https://github.com/linux-surface/iptsd) (build from source with meson). |
+| Only single-touch, no pen | Run `./tools/setup-touch.sh`, then `./tools/setup-touch.sh --check`. Logs: `journalctl -b -u 'surface-pro-x-touch@*'`. |
+| No touch at all with iptsd installed | iptsd isn't running, but the single-touch devices are hidden. `sudo systemctl restart surface-pro-x-touch@hidraw0`. Don't run a second iptsd by hand next to the service: when it exits it switches the touchscreen back to single-touch mode. |
+| Touch stops working until a reboot | Known intermittent spi-hid problem ([linux-surface#32](https://github.com/linux-surface/surface-pro-x/issues/32)). Reload the driver: `sudo modprobe -r spi_hid && sudo modprobe spi_hid`. |
 | UEFI entry missing after a firmware update | Pick the drive from the Volume Down boot menu, then run `sudo efibootmgr --create --disk /dev/nvme0n1 --part <ESP#> --label "Fedora (Surface Pro X)" --loader '\EFI\fedora\shimaa64.efi'`. |
 
 **Removing Fedora:**

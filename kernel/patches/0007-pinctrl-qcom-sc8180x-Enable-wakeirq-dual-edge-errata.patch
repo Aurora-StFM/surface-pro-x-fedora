@@ -1,0 +1,18 @@
+diff --git a/drivers/pinctrl/qcom/pinctrl-sc8180x.c b/drivers/pinctrl/qcom/pinctrl-sc8180x.c
+index d9f9e3dd9..9e19c1d94 100644
+--- a/drivers/pinctrl/qcom/pinctrl-sc8180x.c
++++ b/drivers/pinctrl/qcom/pinctrl-sc8180x.c
+@@ -1600,6 +1600,13 @@ static struct msm_pinctrl_soc_data sc8180x_pinctrl = {
+ 	.ngpios = 191,
+ 	.wakeirq_map = sc8180x_pdc_map,
+ 	.nwakeirq_map = ARRAY_SIZE(sc8180x_pdc_map),
++	/*
++	 * Like SM8150 and SDM845, the PDC only triggers on one edge of an
++	 * IRQ_TYPE_EDGE_BOTH wake interrupt. Seen on the Surface Pro X lid
++	 * switch (GPIO 121): opening the cover raised an interrupt, closing
++	 * it did not.
++	 */
++	.wakeirq_dual_edge_errata = true,
+ };
+ 
+ static const struct msm_pinctrl_soc_data sc8180x_acpi_pinctrl = {

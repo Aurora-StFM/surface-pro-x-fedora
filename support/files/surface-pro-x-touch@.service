@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Pro X touchscreen and pen (iptsd on %I)
+Documentation=https://github.com/linux-surface/iptsd
+BindsTo=dev-%i.device
+After=dev-%i.device
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/surface-pro-x/surface-pro-x-touch /dev/%I
+Restart=on-failure
+RestartSec=2

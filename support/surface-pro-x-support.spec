@@ -1,5 +1,5 @@
 Name:           surface-pro-x-support
-Version:        1.7
+Version:        1.9
 Release:        1
 Summary:        Fedora integration for the Microsoft Surface Pro X
 License:        MIT
@@ -18,6 +18,10 @@ Source11:       66-surface-pro-x-audio.rules
 Source12:       surface-pro-x-bt-address
 Source13:       surface-pro-x-bt-address.service
 Source14:       67-surface-pro-x-bluetooth.rules
+Source15:       68-surface-pro-x-touch.rules
+Source16:       surface-pro-x-touch
+Source17:       surface-pro-x-touch@.service
+Source18:       51-surface-pro-x-audio.conf
 
 Requires:       systemd-udev
 Requires:       dracut
@@ -30,6 +34,9 @@ Requires:       dosfstools
 Requires:       e2fsprogs
 Requires:       alsa-ucm
 Requires:       bluez
+# Touch and pen processing. Not in Fedora's repositories everywhere, so a soft
+# dependency; tools/setup-touch.sh builds it when dnf has none.
+Recommends:     iptsd
 
 %description
 Glue that makes Fedora boot and run on the Surface Pro X with kernel-spx:
@@ -42,6 +49,7 @@ Glue that makes Fedora boot and run on the Surface Pro X with kernel-spx:
 - surface-pro-x-diag, which collects hardware diagnostics for bring-up work
 - ALSA UCM profile for the speakers and headset jack (experimental)
 - Bluetooth address setup for the WCN3998 controller, which has none of its own
+- pulls in iptsd for multitouch and pen input (when available)
 
 %prep
 
@@ -57,6 +65,10 @@ install -Dm0644 %{SOURCE11} %{buildroot}/usr/lib/udev/rules.d/66-surface-pro-x-a
 install -Dm0755 %{SOURCE12} %{buildroot}/usr/libexec/surface-pro-x/surface-pro-x-bt-address
 install -Dm0644 %{SOURCE13} %{buildroot}/usr/lib/systemd/system/surface-pro-x-bt-address.service
 install -Dm0644 %{SOURCE14} %{buildroot}/usr/lib/udev/rules.d/67-surface-pro-x-bluetooth.rules
+install -Dm0644 %{SOURCE15} %{buildroot}/usr/lib/udev/rules.d/68-surface-pro-x-touch.rules
+install -Dm0755 %{SOURCE16} %{buildroot}/usr/libexec/surface-pro-x/surface-pro-x-touch
+install -Dm0644 %{SOURCE17} %{buildroot}/usr/lib/systemd/system/surface-pro-x-touch@.service
+install -Dm0644 %{SOURCE18} %{buildroot}/usr/share/wireplumber/wireplumber.conf.d/51-surface-pro-x-audio.conf
 install -Dm0644 %{SOURCE6} %{buildroot}/usr/lib/systemd/system-preset/50-surface-pro-x.preset
 install -Dm0755 %{SOURCE7} %{buildroot}/usr/sbin/surface-pro-x-install
 install -Dm0755 %{SOURCE8} %{buildroot}/usr/sbin/surface-pro-x-diag
@@ -87,6 +99,10 @@ fi
 /usr/lib/udev/rules.d/65-surface-pro-x-rmtfs.rules
 /usr/lib/udev/rules.d/66-surface-pro-x-audio.rules
 /usr/lib/udev/rules.d/67-surface-pro-x-bluetooth.rules
+/usr/lib/udev/rules.d/68-surface-pro-x-touch.rules
+/usr/libexec/surface-pro-x/surface-pro-x-touch
+/usr/lib/systemd/system/surface-pro-x-touch@.service
+/usr/share/wireplumber/wireplumber.conf.d/51-surface-pro-x-audio.conf
 /usr/libexec/surface-pro-x/surface-pro-x-bt-address
 /usr/lib/systemd/system/surface-pro-x-bt-address.service
 /usr/lib/systemd/system-preset/50-surface-pro-x.preset
@@ -100,6 +116,18 @@ fi
 /usr/share/alsa/ucm2/conf.d/sdm845/sdm845.conf
 
 %changelog
+* Sat Oct 24 2026 Surface Pro X Fedora kit <spx@localhost> - 1.9-1
+- WirePlumber: play to the speakers in 16-bit; with PipeWire's default
+  S24_LE the DSP output was about 48 dB too quiet
+
+* Mon Oct 19 2026 Surface Pro X Fedora kit <spx@localhost> - 1.8-1
+- Recommend iptsd for multitouch and pen input
+- Touchscreen with iptsd: start iptsd through surface-pro-x-touch@.service,
+  which holds the touchscreen open until spi-hid reports it ready (iptsd's
+  own start fails on this transport); hide the digitizer's single-touch
+  devices from libinput so contacts are not reported twice
+- surface-pro-x-diag: collect touchscreen (spi-hid) and iptsd state
+
 * Sun Oct 18 2026 Surface Pro X Fedora kit <spx@localhost> - 1.7-1
 - udev: keep the SLIMbus controller, the codec's SoundWire link and the
   WSA881x speaker amplifiers out of runtime suspend (they drop off the bus
