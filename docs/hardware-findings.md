@@ -258,3 +258,9 @@ All three sensors already have Linux drivers, and they're the same sensors other
 ## Touch after sleep (25 Oct 2026)
 
 - After resume spi-hid logs "Failed to receive header: -108" and runs its error handler (device reset). The touchscreen comes back in single-touch mode while iptsd keeps running, so multitouch is lost. Restarting iptsd switches it back. Support 1.13 adds `surface-pro-x-touch-resume.service` (same `Before=sleep.target` / `StopWhenUnneeded` pattern as the audio sleep service) that restarts `surface-pro-x-touch@*` after resume.
+
+## Ambient light sensor (26 Oct 2026)
+
+- i2c0 0x39 reports chip ID 0xdc (REVID 0x41): an AMS TCS3430, as the Windows data (MSHW0184) suggested, not the APDS9960 in the device tree. apds9960 bound anyway (similar register map: ENABLE 0x80, ATIME 0x81, data from 0x94) but every value read 0; it also writes APDS-only registers (0x8e/0x8f, gesture block) that are reserved on the TCS3430.
+- Set up by hand with datasheet defaults (CFG3 0x0c, AZ_CONFIG 0x7f, 16x gain, 100 ms, PON+AEN) the chip works: indoors X/Y/Z/IR read only 0-2 counts (dark ink in front of the sensor), a lamp gives ~1000-1700. `tools/als-test.sh` does this test.
+- Kernel patch 0010 (6.18.3-12) adds a `tcs3430` IIO driver: `in_illuminance_input` from Y with autogain 1x-128x at 200 ms, raw X/Y/Z/IR, and a `lux_coef` module parameter (default 20000, lux = Y * coef / (gain * t_ms)) for calibration against a reference lux meter.

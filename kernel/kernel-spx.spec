@@ -83,6 +83,11 @@ done
 %ghost %dir /boot/dtb-%{kver}
 
 %changelog
+* Mon Oct 26 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
+- Ambient light sensor: new tcs3430 IIO driver (patch 0010); the device
+  tree now describes the sensor as the AMS TCS3430 it is, instead of an
+  APDS9960 (which always read 0)
+
 * Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
 - slim-ngd: only refuse transfers while the devices are being torn down,
   not whenever the state is DOWN; the -10 change also blocked the capability

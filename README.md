@@ -29,7 +29,8 @@ The kit packages all of this the Fedora way, as signed RPMs plus a few integrati
 | Screen rotation (accelerometer) | Works with kernel-spx 6.18.3-7 or later and `tools/setup-sensors.sh`. See [Sensors](#sensors-screen-rotation) |
 | Compass | Works on its own, but not together with the accelerometer yet |
 | Lid switch (closing the Type Cover) | Testing: kernel-spx 6.18.3-8 or later (device tree patch 0006) |
-| Ambient light, proximity | Not working yet |
+| Ambient light | Testing: kernel-spx 6.18.3-12 or later (new TCS3430 driver, patch 0010). KDE's automatic brightness reads it through iio-sensor-proxy. Calibrate with `tcs3430.lux_coef` |
+| Proximity | Not working yet |
 | Cameras, LTE | Not working yet. See `docs/hardware-findings.md` |
 | GTK 4 apps (GNOME apps, Flatpaks) | Can draw with corrupted, displaced tiles (GTK's Vulkan renderer, turnip on the Adreno 680). Per app: `GSK_RENDERER=ngl <app>` or `TU_DEBUG=sysmem`. See `docs/hardware-findings.md`. |
 | Known issue | The screen sometimes stays black after boot (display handover). Hold the power button to restart. |

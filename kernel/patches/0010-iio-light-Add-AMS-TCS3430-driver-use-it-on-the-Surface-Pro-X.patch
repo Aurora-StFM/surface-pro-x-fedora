@@ -1,0 +1,421 @@
+From 438757dfa9ae1dbd50fdaa596422d74cc9c74055 Mon Sep 17 00:00:00 2001
+From: Surface Pro X Fedora kit <spx@localhost>
+Date: Mon, 26 Oct 2026 19:46:50 +0100
+Subject: [PATCH] iio: light: Add AMS TCS3430 driver, use it on the Surface Pro
+ X
+
+The Surface Pro X ambient light sensor at i2c0 0x39 is an AMS TCS3430
+(chip ID 0xdc), not the APDS9960 the device tree described. The two
+share part of their register layout, so apds9960 bound to it, but it
+programmed the chip wrongly and every reading was 0.
+
+Add a small driver for the TCS3430: X, Y, Z and IR raw channels, and
+illuminance derived from Y with automatic gain (1x to 128x) at a fixed
+200 ms integration time. The lux coefficient is a module parameter, as
+it depends on the glass in front of the sensor.
+---
+ .../boot/dts/qcom/sc8180x-surface-pro-x.dts   |   3 +-
+ drivers/iio/light/Kconfig                     |  10 +
+ drivers/iio/light/Makefile                    |   1 +
+ drivers/iio/light/tcs3430.c                   | 342 ++++++++++++++++++
+ 4 files changed, 354 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/iio/light/tcs3430.c
+
+diff --git a/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts b/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts
+index b3875db6e..063a7763f 100644
+--- a/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts
++++ b/arch/arm64/boot/dts/qcom/sc8180x-surface-pro-x.dts
+@@ -1222,8 +1222,7 @@ &i2c2 {
+ 	pinctrl-0 = <&i2c2_active>, <&i2c2_als_active>;
+ 
+ 	als@39 {
+-		// TODO: this should actually be a TCS3430
+-		compatible = "avago,apds9960";
++		compatible = "ams,tcs3430";
+ 		reg = <0x39>;
+ 
+ 		interrupts-extended = <&tlmm 24 IRQ_TYPE_LEVEL_LOW>;
+diff --git a/drivers/iio/light/Kconfig b/drivers/iio/light/Kconfig
+index ac1408d37..f40367dda 100644
+--- a/drivers/iio/light/Kconfig
++++ b/drivers/iio/light/Kconfig
+@@ -592,6 +592,16 @@ config TCS3414
+ 	  This driver can also be built as a module.  If so, the module
+ 	  will be called tcs3414.
+ 
++config TCS3430
++	tristate "AMS TCS3430 XYZ colour and ambient light sensor"
++	depends on I2C
++	help
++	  If you say yes here you get support for the AMS TCS3430
++	  tristimulus (XYZ) colour and ambient light sensor.
++
++	  This driver can also be built as a module.  If so, the module
++	  will be called tcs3430.
++
+ config TCS3472
+ 	tristate "TAOS TCS3472 color light-to-digital converter"
+ 	depends on I2C
+diff --git a/drivers/iio/light/Makefile b/drivers/iio/light/Makefile
+index c0048e0d5..e684f66c5 100644
+--- a/drivers/iio/light/Makefile
++++ b/drivers/iio/light/Makefile
+@@ -55,6 +55,7 @@ obj-$(CONFIG_ST_UVIS25)		+= st_uvis25_core.o
+ obj-$(CONFIG_ST_UVIS25_I2C)	+= st_uvis25_i2c.o
+ obj-$(CONFIG_ST_UVIS25_SPI)	+= st_uvis25_spi.o
+ obj-$(CONFIG_TCS3414)		+= tcs3414.o
++obj-$(CONFIG_TCS3430)		+= tcs3430.o
+ obj-$(CONFIG_TCS3472)		+= tcs3472.o
+ obj-$(CONFIG_SENSORS_TSL2563)	+= tsl2563.o
+ obj-$(CONFIG_TSL2583)		+= tsl2583.o
+diff --git a/drivers/iio/light/tcs3430.c b/drivers/iio/light/tcs3430.c
+new file mode 100644
+index 000000000..89080137f
+--- /dev/null
++++ b/drivers/iio/light/tcs3430.c
+@@ -0,0 +1,342 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * AMS TCS3430 XYZ tristimulus colour and ambient light sensor
++ *
++ * 16-bit X, Y, Z and IR channels, I2C address 0x39. The Y channel follows the
++ * CIE 1931 luminosity function, so illuminance is derived from it. The gain is
++ * adjusted automatically when illuminance is read, so both dim rooms and
++ * sunlight stay in range.
++ *
++ * Datasheet: https://ams.com/tcs3430 (DS000464)
++ *
++ * The lux value depends on the glass and ink in front of the sensor. The
++ * default coefficient is a rough estimate for the Microsoft Surface Pro X and
++ * can be adjusted with the lux_coef module parameter.
++ */
++
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
++#include <linux/pm.h>
++
++#include <linux/iio/iio.h>
++
++#define TCS3430_ENABLE		0x80
++#define  TCS3430_ENABLE_PON	BIT(0)
++#define  TCS3430_ENABLE_AEN	BIT(1)
++#define TCS3430_ATIME		0x81
++#define TCS3430_PERS		0x8c
++#define TCS3430_CFG0		0x8d
++#define  TCS3430_CFG0_RESERVED	0x80
++#define TCS3430_CFG1		0x90
++#define  TCS3430_CFG1_AGAIN	GENMASK(1, 0)
++#define TCS3430_REVID		0x91
++#define TCS3430_ID		0x92
++#define  TCS3430_ID_VALUE	0xdc
++#define TCS3430_STATUS		0x93
++#define TCS3430_CH0_Z		0x94
++#define TCS3430_CH1_Y		0x96
++#define TCS3430_CH2_IR1		0x98
++#define TCS3430_CH3_X		0x9a
++#define TCS3430_CFG2		0x9f
++#define  TCS3430_CFG2_DEFAULT	0x04
++#define  TCS3430_CFG2_HGAIN	BIT(4)
++#define TCS3430_CFG3		0xab
++#define  TCS3430_CFG3_DEFAULT	0x0c
++#define TCS3430_AZ_CONFIG	0xd6
++#define  TCS3430_AZ_DEFAULT	0x7f
++#define TCS3430_INTENAB		0xdd
++
++/* 72 integration cycles of 2.78 ms = 200 ms */
++#define TCS3430_ATIME_CYCLES	72
++#define TCS3430_ATIME_US	(TCS3430_ATIME_CYCLES * 2780)
++#define TCS3430_MAX_COUNT	min(65535, TCS3430_ATIME_CYCLES * 1024)
++
++/* Autoranging thresholds on the Y channel */
++#define TCS3430_HIGH_COUNT	(TCS3430_MAX_COUNT * 9 / 10)
++#define TCS3430_LOW_COUNT	300
++
++static unsigned int lux_coef = 20000;
++module_param(lux_coef, uint, 0644);
++MODULE_PARM_DESC(lux_coef,
++	"Illuminance coefficient: lux = Y * lux_coef / (gain * integration time in ms)");
++
++struct tcs3430_gain {
++	u8 again;	/* CFG1 AGAIN field */
++	bool hgain;	/* CFG2 HGAIN, only valid with AGAIN = 64x */
++	unsigned int factor;
++};
++
++static const struct tcs3430_gain tcs3430_gains[] = {
++	{ 0, false, 1 },
++	{ 1, false, 4 },
++	{ 2, false, 16 },
++	{ 3, false, 64 },
++	{ 3, true, 128 },
++};
++
++struct tcs3430_data {
++	struct i2c_client *client;
++	struct mutex lock;	/* serialises gain changes and reads */
++	unsigned int gain_idx;
++};
++
++enum { TCS3430_X, TCS3430_Y, TCS3430_Z, TCS3430_IR };
++
++#define TCS3430_INTENSITY(_mod, _reg) {					\
++	.type = IIO_INTENSITY,						\
++	.modified = 1,							\
++	.channel2 = _mod,						\
++	.address = _reg,						\
++	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),			\
++	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_HARDWAREGAIN) |	\
++				    BIT(IIO_CHAN_INFO_INT_TIME),	\
++}
++
++static const struct iio_chan_spec tcs3430_channels[] = {
++	{
++		.type = IIO_LIGHT,
++		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
++	},
++	TCS3430_INTENSITY(IIO_MOD_X, TCS3430_CH3_X),
++	TCS3430_INTENSITY(IIO_MOD_Y, TCS3430_CH1_Y),
++	TCS3430_INTENSITY(IIO_MOD_Z, TCS3430_CH0_Z),
++	TCS3430_INTENSITY(IIO_MOD_LIGHT_IR, TCS3430_CH2_IR1),
++};
++
++static int tcs3430_write(struct tcs3430_data *data, u8 reg, u8 val)
++{
++	return i2c_smbus_write_byte_data(data->client, reg, val);
++}
++
++static int tcs3430_set_gain(struct tcs3430_data *data, unsigned int idx)
++{
++	const struct tcs3430_gain *g = &tcs3430_gains[idx];
++	int ret;
++
++	/* AMUX (bit 3) stays 0: channel 3 reports X */
++	ret = tcs3430_write(data, TCS3430_CFG1, g->again);
++	if (ret)
++		return ret;
++	ret = tcs3430_write(data, TCS3430_CFG2, TCS3430_CFG2_DEFAULT |
++			    (g->hgain ? TCS3430_CFG2_HGAIN : 0));
++	if (ret)
++		return ret;
++	data->gain_idx = idx;
++	return 0;
++}
++
++/* Wait until a full integration with the current settings has completed. */
++static void tcs3430_wait_cycle(void)
++{
++	fsleep(2 * TCS3430_ATIME_US + 20000);
++}
++
++static int tcs3430_init(struct tcs3430_data *data)
++{
++	static const u8 regs[][2] = {
++		{ TCS3430_ENABLE, 0 },
++		{ TCS3430_PERS, 0 },
++		{ TCS3430_CFG0, TCS3430_CFG0_RESERVED },
++		{ TCS3430_CFG3, TCS3430_CFG3_DEFAULT },
++		{ TCS3430_AZ_CONFIG, TCS3430_AZ_DEFAULT },
++		{ TCS3430_INTENAB, 0 },
++		{ TCS3430_ATIME, TCS3430_ATIME_CYCLES - 1 },
++	};
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(regs); i++) {
++		ret = tcs3430_write(data, regs[i][0], regs[i][1]);
++		if (ret)
++			return ret;
++	}
++	ret = tcs3430_set_gain(data, data->gain_idx);
++	if (ret)
++		return ret;
++	ret = tcs3430_write(data, TCS3430_ENABLE, TCS3430_ENABLE_PON);
++	if (ret)
++		return ret;
++	usleep_range(3000, 4000);
++	return tcs3430_write(data, TCS3430_ENABLE,
++			     TCS3430_ENABLE_PON | TCS3430_ENABLE_AEN);
++}
++
++static int tcs3430_power_off(struct tcs3430_data *data)
++{
++	return tcs3430_write(data, TCS3430_ENABLE, 0);
++}
++
++static int tcs3430_read_word(struct tcs3430_data *data, u8 reg)
++{
++	return i2c_smbus_read_word_data(data->client, reg);
++}
++
++/* Read Y, stepping the gain up or down until it is in a useful range. */
++static int tcs3430_read_y_autorange(struct tcs3430_data *data)
++{
++	unsigned int idx, tries;
++	int y, ret;
++
++	for (tries = 0; tries < ARRAY_SIZE(tcs3430_gains); tries++) {
++		y = tcs3430_read_word(data, TCS3430_CH1_Y);
++		if (y < 0)
++			return y;
++
++		idx = data->gain_idx;
++		if (y >= TCS3430_HIGH_COUNT && idx > 0) {
++			idx--;
++		} else if (y < TCS3430_LOW_COUNT &&
++			   idx < ARRAY_SIZE(tcs3430_gains) - 1 &&
++			   (u64)y * tcs3430_gains[idx + 1].factor <
++			   (u64)TCS3430_HIGH_COUNT * tcs3430_gains[idx].factor) {
++			idx++;
++		} else {
++			return y;
++		}
++
++		ret = tcs3430_set_gain(data, idx);
++		if (ret)
++			return ret;
++		tcs3430_wait_cycle();
++	}
++	return tcs3430_read_word(data, TCS3430_CH1_Y);
++}
++
++static int tcs3430_read_raw(struct iio_dev *indio_dev,
++			    struct iio_chan_spec const *chan,
++			    int *val, int *val2, long mask)
++{
++	struct tcs3430_data *data = iio_priv(indio_dev);
++	u64 ulux, div;
++	u32 rem;
++	int ret;
++
++	guard(mutex)(&data->lock);
++
++	switch (mask) {
++	case IIO_CHAN_INFO_PROCESSED:
++		ret = tcs3430_read_y_autorange(data);
++		if (ret < 0)
++			return ret;
++		/* lux = Y * coef / (gain * t_ms), in micro-lux */
++		ulux = (u64)ret * lux_coef * 1000000000ULL;
++		div = (u64)tcs3430_gains[data->gain_idx].factor * TCS3430_ATIME_US;
++		ulux = div64_u64(ulux, div);
++		*val = div_u64_rem(ulux, 1000000, &rem);
++		*val2 = rem;
++		return IIO_VAL_INT_PLUS_MICRO;
++	case IIO_CHAN_INFO_RAW:
++		ret = tcs3430_read_word(data, chan->address);
++		if (ret < 0)
++			return ret;
++		*val = ret;
++		return IIO_VAL_INT;
++	case IIO_CHAN_INFO_HARDWAREGAIN:
++		*val = tcs3430_gains[data->gain_idx].factor;
++		return IIO_VAL_INT;
++	case IIO_CHAN_INFO_INT_TIME:
++		*val = 0;
++		*val2 = TCS3430_ATIME_US;
++		return IIO_VAL_INT_PLUS_MICRO;
++	default:
++		return -EINVAL;
++	}
++}
++
++static const struct iio_info tcs3430_info = {
++	.read_raw = tcs3430_read_raw,
++};
++
++static void tcs3430_disable(void *arg)
++{
++	tcs3430_power_off(arg);
++}
++
++static int tcs3430_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct tcs3430_data *data;
++	struct iio_dev *indio_dev;
++	int ret;
++
++	indio_dev = devm_iio_device_alloc(dev, sizeof(*data));
++	if (!indio_dev)
++		return -ENOMEM;
++
++	data = iio_priv(indio_dev);
++	data->client = client;
++	data->gain_idx = 2;	/* 16x */
++	ret = devm_mutex_init(dev, &data->lock);
++	if (ret)
++		return ret;
++
++	ret = i2c_smbus_read_byte_data(client, TCS3430_ID);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "failed to read chip ID\n");
++	if (ret != TCS3430_ID_VALUE)
++		dev_warn(dev, "unexpected chip ID 0x%02x\n", ret);
++
++	ret = tcs3430_init(data);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to initialise\n");
++	ret = devm_add_action_or_reset(dev, tcs3430_disable, data);
++	if (ret)
++		return ret;
++
++	indio_dev->name = "tcs3430";
++	indio_dev->info = &tcs3430_info;
++	indio_dev->channels = tcs3430_channels;
++	indio_dev->num_channels = ARRAY_SIZE(tcs3430_channels);
++	indio_dev->modes = INDIO_DIRECT_MODE;
++
++	return devm_iio_device_register(dev, indio_dev);
++}
++
++static int tcs3430_suspend(struct device *dev)
++{
++	struct tcs3430_data *data = iio_priv(dev_get_drvdata(dev));
++
++	guard(mutex)(&data->lock);
++	return tcs3430_power_off(data);
++}
++
++static int tcs3430_resume(struct device *dev)
++{
++	struct tcs3430_data *data = iio_priv(dev_get_drvdata(dev));
++
++	guard(mutex)(&data->lock);
++	return tcs3430_init(data);
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(tcs3430_pm_ops, tcs3430_suspend, tcs3430_resume);
++
++static const struct i2c_device_id tcs3430_id[] = {
++	{ "tcs3430" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, tcs3430_id);
++
++static const struct of_device_id tcs3430_of_match[] = {
++	{ .compatible = "ams,tcs3430" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, tcs3430_of_match);
++
++static struct i2c_driver tcs3430_driver = {
++	.driver = {
++		.name = "tcs3430",
++		.of_match_table = tcs3430_of_match,
++		.pm = pm_sleep_ptr(&tcs3430_pm_ops),
++	},
++	.probe = tcs3430_probe,
++	.id_table = tcs3430_id,
++};
++module_i2c_driver(tcs3430_driver);
++
++MODULE_DESCRIPTION("AMS TCS3430 XYZ colour and ambient light sensor driver");
++MODULE_LICENSE("GPL");
+-- 
+2.43.0
+
