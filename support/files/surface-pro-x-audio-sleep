@@ -1,0 +1,149 @@
+#!/bin/sh
+# Surface Pro X: take the audio DSP (ADSP) down around system sleep.
+#
+# With the ADSP running, s2idle suspend hangs and the machine never wakes up.
+# Run by surface-pro-x-audio-sleep.service (pulled in by sleep.target):
+#   surface-pro-x-audio-sleep stop      before sleep: stop audio, stop the ADSP
+#   surface-pro-x-audio-sleep start     after resume: restart both
+# "restore" (same as start) can also be run by hand.
+#
+# This must run BEFORE systemd-sleep, not as a system-sleep hook: systemd-sleep
+# freezes user.slice before it runs hooks, so PipeWire can't be stopped and keeps
+# /dev/snd open. Stopping the ADSP removes the codec and the sound card, and the
+# card removal waits for every open /dev/snd file, so it blocked forever and the
+# frozen-in-the-kernel task made every suspend attempt fail ("refusing to freeze").
+#
+# Only acts if the ADSP was running before sleep.
+STATE=/run/surface-pro-x/adsp-was-running
+AUDIO_UNITS="pipewire.socket pipewire-pulse.socket pipewire wireplumber pipewire-pulse"
+
+log() { echo "surface-pro-x-audio-sleep: $*"; }
+
+adsp_path() {
+    for r in /sys/class/remoteproc/*; do
+        [ "$(cat "$r/name" 2>/dev/null)" = adsp ] && { echo "$r"; return 0; }
+    done
+    return 1
+}
+
+# Run "systemctl --user ACTION AUDIO_UNITS" for every logged-in user.
+user_audio() { # stop|start
+    for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+        timeout 20 systemctl --user --machine="$u@.host" "$1" $AUDIO_UNITS >/dev/null 2>&1 || :
+    done
+}
+
+# PIDs that have a sound card device open (control, PCM, hwdep).
+# (One find process; a readlink per open file took over a minute.)
+snd_holders() {
+    find /proc/[0-9]*/fd -maxdepth 1 \( -lname '/dev/snd/controlC*' \
+        -o -lname '/dev/snd/pcmC*' -o -lname '/dev/snd/hwC*' \) 2>/dev/null |
+        cut -d/ -f3 | grep -vx "$$" | sort -u
+}
+
+# Make sure nothing holds the sound card open. Returns 1 if that failed.
+release_card() {
+    i=0
+    while [ -n "$(snd_holders)" ] && [ $i -lt 10 ]; do
+        sleep 0.5; i=$((i + 1))
+    done
+    pids="$(snd_holders)"
+    [ -z "$pids" ] && return 0
+    for p in $pids; do log "closing sound device user $p ($(cat /proc/$p/comm 2>/dev/null))"; done
+    kill -TERM $pids 2>/dev/null; sleep 1
+    pids="$(snd_holders)"
+    [ -n "$pids" ] && { kill -KILL $pids 2>/dev/null; sleep 1; }
+    [ -z "$(snd_holders)" ]
+}
+
+keep_on() {
+    for d in "$@"; do
+        [ -e "$d/power/control" ] && echo on > "$d/power/control" 2>/dev/null
+    done
+}
+
+CARD_DRV=/sys/bus/platform/drivers/msm-snd-sdm845
+
+wait_card() { # seconds
+    i=0
+    until grep -q Surface /proc/asound/cards 2>/dev/null; do
+        [ $i -ge "$1" ] && return 1
+        sleep 1; i=$((i + 1))
+    done
+}
+
+rebind_card() {
+    [ -d "$CARD_DRV" ] || return 0
+    log "sound card missing, rebinding the card driver"
+    echo sound > "$CARD_DRV/unbind" 2>/dev/null
+    sleep 1
+    echo sound > "$CARD_DRV/bind" 2>/dev/null
+}
+
+stop_audio() {
+    # Stopping the ADSP deadlocks before kernel-spx 6.18.3-11 (patch 0009).
+    rel="$(uname -r | sed -n 's/^[0-9.]*-\([0-9]*\)\.spx\..*/\1/p')"
+    [ -n "$rel" ] && [ "$rel" -ge 11 ] || exit 0
+    adsp="$(adsp_path)" || exit 0
+    [ "$(cat "$adsp/state")" = running ] || exit 0
+    mkdir -p "$(dirname "$STATE")" && touch "$STATE"
+    user_audio stop
+    # alsactl's state daemon (alsa-state.service) keeps the card's control
+    # device open; stop it properly instead of killing it.
+    if systemctl -q is-active alsa-state.service 2>/dev/null; then
+        touch "$STATE.alsa-state"
+        timeout 15 systemctl stop alsa-state.service 2>/dev/null || :
+    fi
+    if ! release_card; then
+        log "sound card still in use, NOT stopping the ADSP (suspend may not wake)"
+        exit 0
+    fi
+    log "stopping the ADSP"
+    echo stop > "$adsp/state"
+    log "ADSP stopped"
+}
+
+restore() {
+    adsp="$(adsp_path)" || exit 0
+    user_audio stop
+    keep_on /sys/bus/platform/devices/*slim-ngd*
+    [ "$(cat "$adsp/state")" = running ] || { log "starting the ADSP"; echo start > "$adsp/state"; }
+    wait_card 15 || {
+        # After an ADSP restart the card driver sometimes tries to assemble
+        # the card before all parts are back and never retries; rebind it.
+        rebind_card
+        wait_card 15
+    }
+    sleep 3
+    keep_on /sys/bus/platform/devices/wcd934x-soundwire* /sys/bus/soundwire/devices/sdw:*:0217:2110:*
+    # The first stream after an ADSP start fails ("Memory_map_regions failed");
+    # take it here so PipeWire gets a working device.
+    sleep 2
+    for _ in 1 2; do
+        timeout 5 aplay -q -D plughw:0,0 -f S16_LE -r 48000 -c 2 -d 1 /dev/zero >/dev/null 2>&1 || :
+    done
+    if [ -e "$STATE.alsa-state" ]; then
+        rm -f "$STATE.alsa-state"
+        systemctl start --no-block alsa-state.service 2>/dev/null || :
+    fi
+    user_audio start
+    log "audio restored"
+}
+
+case "$1" in
+    stop)
+        stop_audio
+        ;;
+    start)
+        [ -e "$STATE" ] || exit 0
+        rm -f "$STATE"
+        restore
+        ;;
+    restore)
+        restore
+        ;;
+    pre|post)
+        # Old system-sleep hook (support 1.10/1.11): too late, see above.
+        ;;
+esac
+exit 0

@@ -193,7 +193,7 @@ The SMMU stream IDs come from the Surface's own Windows IORT table. `docs/hardwa
 
 **What works:** the ADSP starts, SLIMbus comes up, the codec and both speaker amplifiers are detected, and the speakers play at normal volume.
 
-**The speaker level needs `surface-pro-x-support` 1.9 or later.** PipeWire would otherwise send 24-bit audio, which this DSP firmware plays about 48 dB too quietly (and crackly when turned up). The package includes a WirePlumber setting that makes PipeWire use 16-bit. Kernel-spx 6.18.3-9 also fixes the speakers' smart boost clock in the codec driver.
+**Speaker playback needs `surface-pro-x-support` 1.10 or later.** The codec wrongly reports a headphone plug (the Surface Pro X has no jack); with older profiles PipeWire switched to "headphones" and disconnected the speakers. 1.9 and later also make PipeWire play 16-bit: PipeWire would otherwise send 24-bit audio, which this DSP firmware plays about 48 dB too quietly (and crackly when turned up). The package includes a WirePlumber setting that makes PipeWire use 16-bit. Kernel-spx 6.18.3-9 also fixes the speakers' smart boost clock in the codec driver.
 
 **What does not work yet:**
 
@@ -290,6 +290,7 @@ iptsd's own automatic start doesn't work here: the touchscreen driver (`spi_hid`
 | No Bluetooth, other | `sudo dmesg \| grep -i qca`. The firmware package provides the `crnv01`/`crbtfw01` links the [wiki](https://github.com/linux-surface/surface-pro-x/wiki/Bluetooth) describes. Also check `bluetoothctl show` and `sudo btmgmt info`. |
 | Only single-touch, no pen | Run `./tools/setup-touch.sh`, then `./tools/setup-touch.sh --check`. Logs: `journalctl -b -u 'surface-pro-x-touch@*'`. |
 | No touch at all with iptsd installed | iptsd isn't running, but the single-touch devices are hidden. `sudo systemctl restart surface-pro-x-touch@hidraw0`. Don't run a second iptsd by hand next to the service: when it exits it switches the touchscreen back to single-touch mode. |
+| Only single-touch after waking from sleep | Fixed in `surface-pro-x-support` 1.13 (restarts iptsd after resume). By hand: `sudo systemctl restart 'surface-pro-x-touch@*'`. |
 | Touch stops working until a reboot | Known intermittent spi-hid problem ([linux-surface#32](https://github.com/linux-surface/surface-pro-x/issues/32)). Reload the driver: `sudo modprobe -r spi_hid && sudo modprobe spi_hid`. |
 | UEFI entry missing after a firmware update | Pick the drive from the Volume Down boot menu, then run `sudo efibootmgr --create --disk /dev/nvme0n1 --part <ESP#> --label "Fedora (Surface Pro X)" --loader '\EFI\fedora\shimaa64.efi'`. |
 
@@ -300,6 +301,8 @@ iptsd's own automatic start doesn't work here: the touchscreen driver (`spi_hid`
 3. Turn Secure Boot back on in the Surface UEFI.
 
 ## Building pieces separately
+
+For copy-paste blocks covering the whole rebuild/update cycle (build PC setup, building, pushing, installing on the Surface), see [`docs/build-and-update.md`](docs/build-and-update.md).
 
 ```bash
 ./build.sh kernel                      # out/rpms/kernel-spx-*.aarch64.rpm

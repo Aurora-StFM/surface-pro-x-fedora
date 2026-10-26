@@ -1,0 +1,60 @@
+diff --git a/drivers/slimbus/qcom-ngd-ctrl.c b/drivers/slimbus/qcom-ngd-ctrl.c
+index cd40ab839..ab39c946b 100644
+--- a/drivers/slimbus/qcom-ngd-ctrl.c
++++ b/drivers/slimbus/qcom-ngd-ctrl.c
+@@ -168,6 +168,8 @@ struct qcom_slim_ngd_ctrl {
+ 	void *notifier;
+ 	struct pdr_handle *pdr;
+ 	enum qcom_slim_ngd_state state;
++	/* Set while the devices are torn down for an ADSP shutdown/SSR. */
++	bool tearing_down;
+ 	dma_addr_t rx_phys_base;
+ 	dma_addr_t tx_phys_base;
+ 	void *rx_base;
+@@ -805,6 +807,10 @@ static int qcom_slim_ngd_xfer_msg(struct slim_controller *sctrl,
+ 	if (txn->dt == SLIM_MSG_DEST_ENUMADDR)
+ 		return -EPROTONOSUPPORT;
+ 
++	/* The ADSP (and with it the SLIMbus master) is going away. */
++	if (READ_ONCE(ctrl->tearing_down))
++		return -ENETDOWN;
++
+ 	if (txn->msg->num_bytes > SLIM_MSGQ_BUF_LEN ||
+ 			txn->rl > SLIM_MSGQ_BUF_LEN) {
+ 		dev_err(ctrl->dev, "msg exceeds HW limit\n");
+@@ -1471,16 +1477,34 @@ static int qcom_slim_ngd_ssr_pdr_notify(struct qcom_slim_ngd_ctrl *ctrl,
+ 	switch (action) {
+ 	case QCOM_SSR_BEFORE_SHUTDOWN:
+ 	case SERVREG_SERVICE_STATE_DOWN:
++	{
++		bool going_down = false;
++
+ 		/* Make sure the last dma xfer is finished */
+ 		mutex_lock(&ctrl->tx_lock);
+ 		if (ctrl->state != QCOM_SLIM_NGD_CTRL_DOWN) {
+ 			pm_runtime_get_noresume(ctrl->ctrl.dev);
+ 			ctrl->state = QCOM_SLIM_NGD_CTRL_DOWN;
++			WRITE_ONCE(ctrl->tearing_down, true);
++			going_down = true;
++		}
++		mutex_unlock(&ctrl->tx_lock);
++
++		/*
++		 * Not under tx_lock: reporting the devices absent removes the
++		 * codec, and its teardown (e.g. freeing the MBHC interrupt)
++		 * writes codec registers through qcom_slim_ngd_xfer_msg(),
++		 * which takes tx_lock. Holding it here deadlocked every ADSP
++		 * shutdown (echo stop > remoteproc state, SSR). Transfers made
++		 * during the teardown fail fast instead.
++		 */
++		if (going_down) {
+ 			qcom_slim_ngd_down(ctrl);
+ 			qcom_slim_ngd_exit_dma(ctrl);
++			WRITE_ONCE(ctrl->tearing_down, false);
+ 		}
+-		mutex_unlock(&ctrl->tx_lock);
+ 		break;
++	}
+ 	case QCOM_SSR_AFTER_POWERUP:
+ 	case SERVREG_SERVICE_STATE_UP:
+ 		schedule_work(&ctrl->ngd_up_work);

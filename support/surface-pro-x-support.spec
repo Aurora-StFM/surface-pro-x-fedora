@@ -1,5 +1,5 @@
 Name:           surface-pro-x-support
-Version:        1.9
+Version:        1.13
 Release:        1
 Summary:        Fedora integration for the Microsoft Surface Pro X
 License:        MIT
@@ -22,6 +22,9 @@ Source15:       68-surface-pro-x-touch.rules
 Source16:       surface-pro-x-touch
 Source17:       surface-pro-x-touch@.service
 Source18:       51-surface-pro-x-audio.conf
+Source19:       surface-pro-x-audio-sleep
+Source20:       surface-pro-x-audio-sleep.service
+Source21:       surface-pro-x-touch-resume.service
 
 Requires:       systemd-udev
 Requires:       dracut
@@ -69,6 +72,12 @@ install -Dm0644 %{SOURCE15} %{buildroot}/usr/lib/udev/rules.d/68-surface-pro-x-t
 install -Dm0755 %{SOURCE16} %{buildroot}/usr/libexec/surface-pro-x/surface-pro-x-touch
 install -Dm0644 %{SOURCE17} %{buildroot}/usr/lib/systemd/system/surface-pro-x-touch@.service
 install -Dm0644 %{SOURCE18} %{buildroot}/usr/share/wireplumber/wireplumber.conf.d/51-surface-pro-x-audio.conf
+install -Dm0755 %{SOURCE19} %{buildroot}/usr/libexec/surface-pro-x/surface-pro-x-audio-sleep
+install -Dm0644 %{SOURCE20} %{buildroot}/usr/lib/systemd/system/surface-pro-x-audio-sleep.service
+mkdir -p %{buildroot}/usr/lib/systemd/system/sleep.target.wants
+ln -s ../surface-pro-x-audio-sleep.service %{buildroot}/usr/lib/systemd/system/sleep.target.wants/surface-pro-x-audio-sleep.service
+install -Dm0644 %{SOURCE21} %{buildroot}/usr/lib/systemd/system/surface-pro-x-touch-resume.service
+ln -s ../surface-pro-x-touch-resume.service %{buildroot}/usr/lib/systemd/system/sleep.target.wants/surface-pro-x-touch-resume.service
 install -Dm0644 %{SOURCE6} %{buildroot}/usr/lib/systemd/system-preset/50-surface-pro-x.preset
 install -Dm0755 %{SOURCE7} %{buildroot}/usr/sbin/surface-pro-x-install
 install -Dm0755 %{SOURCE8} %{buildroot}/usr/sbin/surface-pro-x-diag
@@ -103,6 +112,11 @@ fi
 /usr/libexec/surface-pro-x/surface-pro-x-touch
 /usr/lib/systemd/system/surface-pro-x-touch@.service
 /usr/share/wireplumber/wireplumber.conf.d/51-surface-pro-x-audio.conf
+/usr/libexec/surface-pro-x/surface-pro-x-audio-sleep
+/usr/lib/systemd/system/surface-pro-x-audio-sleep.service
+/usr/lib/systemd/system/sleep.target.wants/surface-pro-x-audio-sleep.service
+/usr/lib/systemd/system/surface-pro-x-touch-resume.service
+/usr/lib/systemd/system/sleep.target.wants/surface-pro-x-touch-resume.service
 /usr/libexec/surface-pro-x/surface-pro-x-bt-address
 /usr/lib/systemd/system/surface-pro-x-bt-address.service
 /usr/lib/systemd/system-preset/50-surface-pro-x.preset
@@ -116,6 +130,29 @@ fi
 /usr/share/alsa/ucm2/conf.d/sdm845/sdm845.conf
 
 %changelog
+* Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - 1.13-1
+- Touch: restart iptsd after resume (surface-pro-x-touch-resume.service);
+  the touchscreen comes back from sleep in single-touch mode
+
+* Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - 1.12-1
+- Sleep: replace the system-sleep hook with surface-pro-x-audio-sleep.service
+  (before sleep.target). systemd-sleep freezes user.slice before running
+  hooks, so PipeWire kept /dev/snd open, the sound card removal during the
+  ADSP stop blocked forever and every suspend attempt failed to freeze
+- Close any remaining /dev/snd users before stopping the ADSP; stop and
+  restart alsa-state.service (alsactl daemon) around it
+
+* Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - 1.11-1
+- Sleep hook: after restarting the ADSP, rebind the sound card if it
+  doesn't come back by itself (the card driver gave up assembling it)
+
+* Sat Oct 24 2026 Surface Pro X Fedora kit <spx@localhost> - 1.10-1
+- UCM: drop the Headphones and headset Mic devices. The device has no
+  jack, but the codec reports one; PipeWire then switched to Headphones and
+  disconnected the speaker path, so all playback was silent
+- Sleep: stop the audio DSP before suspend and restart it (and PipeWire)
+  after resume; with the ADSP running, s2idle never woke up
+
 * Sat Oct 24 2026 Surface Pro X Fedora kit <spx@localhost> - 1.9-1
 - WirePlumber: play to the speakers in 16-bit; with PipeWire's default
   S24_LE the DSP output was about 48 dB too quiet

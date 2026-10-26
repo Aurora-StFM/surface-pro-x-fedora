@@ -1,0 +1,17 @@
+[Unit]
+Description=Surface Pro X: stop the audio DSP around system sleep
+# Runs before systemd-sleep freezes the user sessions, so PipeWire can still
+# be stopped. Stops again (ExecStop) when sleep.target goes away after resume.
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/surface-pro-x/surface-pro-x-audio-sleep stop
+ExecStop=/usr/libexec/surface-pro-x/surface-pro-x-audio-sleep start
+TimeoutStartSec=90
+TimeoutStopSec=90
+
+[Install]
+WantedBy=sleep.target

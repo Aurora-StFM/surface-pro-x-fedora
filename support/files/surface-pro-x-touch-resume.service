@@ -1,0 +1,16 @@
+[Unit]
+Description=Surface Pro X: restart iptsd after system sleep
+# The touchscreen resets during sleep and comes back in single-touch mode;
+# iptsd only switches it to multitouch when it starts. ExecStop runs when
+# sleep.target goes away after resume.
+Before=sleep.target
+StopWhenUnneeded=yes
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/bin/sh -c 'sleep 1; systemctl restart --no-block "surface-pro-x-touch@*.service"'
+
+[Install]
+WantedBy=sleep.target

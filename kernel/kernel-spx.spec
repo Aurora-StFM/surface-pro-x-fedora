@@ -83,6 +83,16 @@ done
 %ghost %dir /boot/dtb-%{kver}
 
 %changelog
+* Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
+- slim-ngd: only refuse transfers while the devices are being torn down,
+  not whenever the state is DOWN; the -10 change also blocked the capability
+  exchange at ADSP start, so audio didn't come up
+
+* Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
+- slim-ngd: don't hold tx_lock while reporting devices absent on ADSP
+  shutdown/SSR; the codec teardown writes over SLIMbus and took the same
+  lock, so stopping the ADSP deadlocked (needed to stop it around sleep)
+
 * Sat Oct 24 2026 Surface Pro X Fedora kit <spx@localhost> - %{kversion}-%{krelease}
 - wcd934x: enable the speaker smart boost clock with bit 4 of
   BOOST_PATH_CTL (as in lpass-wsa-macro) instead of bit 0; the register
