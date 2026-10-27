@@ -1,7 +1,8 @@
 # Build and update cheat sheet
 
 Copy-paste blocks for rebuilding the kit and updating the Surface. The build
-machine is any x86 or ARM PC with Fedora (native or WSL2); the examples use a
+machine is any x86 or ARM PC with Fedora, native or in WSL2 on Windows (see
+[`using-wsl.md`](using-wsl.md) for the WSL setup). The examples use a native
 Fedora x86 PC with the kit in `~/surface-pro-x-fedora`.
 
 ## 1. One-time setup of a build PC

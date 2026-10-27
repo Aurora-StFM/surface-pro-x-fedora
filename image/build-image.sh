@@ -139,7 +139,7 @@ NSS_BACKUP="$WORK_DIR/nsswitch.conf.orig"
 cp -a "$MNT/etc/nsswitch.conf" "$NSS_BACKUP"
 sed -i 's/^hosts:.*/hosts:      files dns/' "$MNT/etc/nsswitch.conf"
 chroot "$MNT" getent hosts mirrors.fedoraproject.org >/dev/null \
-    || die "DNS does not work inside the image. Check that 'getent hosts mirrors.fedoraproject.org' works in WSL itself."
+    || die "DNS does not work inside the image. Check that 'getent hosts mirrors.fedoraproject.org' works on the build machine itself."
 
 # kernel-install names boot entries after the machine id, which Fedora images
 # ship empty. Borrow the id the existing entries use for the duration.

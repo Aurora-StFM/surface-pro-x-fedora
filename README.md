@@ -59,37 +59,28 @@ The built packages do the following:
 
 ---
 
-## Step 1: Build the image on your Windows PC (WSL)
+## Step 1: Build the image on a Fedora PC
 
-You need about 50 GB free disk space and a 16 GB or larger USB drive. A fast PC builds the kernel in about 20–30 minutes. The image step runs ARM programs under emulation and takes another 20–40 minutes.
+> **Using Windows?** Build inside Fedora on WSL instead. Follow [`docs/using-wsl.md`](docs/using-wsl.md), then continue with [Step 2](#step-2-prepare-windows-on-the-surface).
 
-1. In PowerShell, install Fedora for WSL. List the available versions first and pick the newest Fedora:
+You need a PC running Fedora (Workstation, KDE or any other edition), about 50 GB free disk space, and a 16 GB or larger USB drive. A fast PC builds the kernel in about 20–30 minutes. The image step runs ARM programs under emulation and takes another 20–40 minutes.
 
-   ```powershell
-   wsl --list --online
-   wsl --install FedoraLinux-44
-   ```
-
-2. Open the Fedora shell. Check that systemd is running; it's needed for ARM emulation:
+1. Get the kit into your home folder:
 
    ```bash
-   systemctl is-system-running   # anything except "offline" is fine
+   sudo dnf install -y git
+   git clone https://github.com/Aurora-StFM/surface-pro-x-fedora.git ~/surface-pro-x-fedora
    ```
 
-   If it reports `offline`, add the lines below to `/etc/wsl.conf`, then run `wsl --shutdown` in PowerShell and reopen Fedora:
-
-   ```ini
-   [boot]
-   systemd=true
-   ```
-
-3. Copy this kit into your Linux home folder. Don't use `/mnt/c/...`, which is slow and breaks file permissions. Then build:
+2. Install the build dependencies and build everything:
 
    ```bash
    cd ~/surface-pro-x-fedora
    ./build.sh deps          # installs cross-compiler, rpm-build, qemu, ...
    sudo ./build.sh all      # kernel, firmware, support RPMs, then the image
    ```
+
+   `deps` also registers qemu so the PC can run ARM programs. If the image step later says the `qemu-aarch64 binfmt handler` is missing, run `sudo systemctl restart systemd-binfmt` and check that `/proc/sys/fs/binfmt_misc/qemu-aarch64` exists.
 
    The results go in `out/`:
 
@@ -98,12 +89,23 @@ You need about 50 GB free disk space and a 16 GB or larger USB drive. A fast PC 
 
    Fedora 45 releases on 20 October 2026. To build on it instead, run `FEDORA_RELEASE=45 sudo -E ./build.sh image` once it's out.
 
-4. Write the image to the USB drive from Windows. Open `\\wsl$\FedoraLinux-44\home\<you>\surface-pro-x-fedora\out\` in Explorer. Then use either tool:
+3. Write the image to the USB drive. Plug it in and find its device name. Look for the disk with the USB drive's size, for example `/dev/sdb`:
 
-   - [Fedora Media Writer](https://fedoraproject.org/workstation/download): choose "Select .iso file" and pick the `.raw` file.
-   - [Rufus](https://rufus.ie): rename the file to `.img` and write it in DD mode.
+   ```bash
+   lsblk -o NAME,SIZE,MODEL,TRAN
+   ```
+
+   Then write the image. **Everything on that drive is erased, so double-check the name:**
+
+   ```bash
+   sudo dd if=out/Fedora-KDE-SurfaceProX-44.raw of=/dev/sdX bs=4M status=progress conv=fsync
+   ```
+
+   If you prefer a graphical tool, Fedora Media Writer (`sudo dnf install mediawriter`) works too: choose "Select .iso file" and pick the `.raw` file.
 
    **Optional: firmware from your own Surface.** To use files pulled from your SQ1's own Windows instead of the linux-surface copies, run [`scripts/getfw.py`](https://github.com/linux-surface/aarch64-firmware) against your Windows partition or a Surface recovery image. Then build with `./build.sh firmware --from-dir <output>` and run `sudo ./build.sh image` again.
+
+**Other Linux distributions:** `build.sh` checks that it runs on Fedora. On another distribution, a Fedora container (toolbox or distrobox) is the likely route for the package steps. The image step needs root, loop devices and qemu, and hasn't been tested in a container.
 
 ## Step 2: Prepare Windows on the Surface
 
