@@ -19,10 +19,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Only the newest build of each package goes into the image; out/rpms keeps
+# every older build too.
+newest() { [ $# -gt 0 ] && printf '%s\n' "$@" | sort -V | tail -n1; }
 shopt -s nullglob
-RPMS=("$RPM_DIR"/kernel-spx-*.aarch64.rpm "$RPM_DIR"/surface-pro-x-firmware-*.noarch.rpm "$RPM_DIR"/surface-pro-x-support-*.noarch.rpm)
+RPMS=()
+for pat in 'kernel-spx-*.aarch64.rpm' 'surface-pro-x-firmware-*.noarch.rpm' 'surface-pro-x-support-*.noarch.rpm'; do
+    # shellcheck disable=SC2086
+    f="$(newest "$RPM_DIR"/$pat)" || true
+    [ -n "$f" ] && RPMS+=("$f")
+done
 shopt -u nullglob
-[ ${#RPMS[@]} -ge 3 ] || die "build the packages first (./build.sh kernel firmware support)"
+[ ${#RPMS[@]} -eq 3 ] || die "build the packages first (./build.sh kernel firmware support)"
+msg "Packages for the image: $(for f in "${RPMS[@]}"; do basename "$f"; done | tr '\n' ' ')"
 [ -f "$SIGN_PUBKEY" ] || die "signing key $SIGN_PUBKEY missing"
 
 # ---- qemu for running aarch64 tools in the chroot -------------------------
