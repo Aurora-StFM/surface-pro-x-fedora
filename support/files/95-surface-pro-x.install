@@ -86,6 +86,11 @@ case "$COMMAND" in
         ;;
     remove)
         rm -rf "${BOOTDIR:?}/dtb-$KERNEL_VERSION"
+        # Entries written while the image was built are named after a
+        # temporary machine id, so Fedora's own plugin (which only looks for
+        # this machine's id) leaves them behind when the kernel goes. Remove
+        # every entry for this version, whatever id it is named after.
+        rm -f "$BOOTDIR"/loader/entries/*-"$KERNEL_VERSION".conf
         ;;
 esac
 
