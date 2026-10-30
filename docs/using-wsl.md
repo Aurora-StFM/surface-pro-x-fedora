@@ -51,7 +51,7 @@ The results go in `out/`:
 - **`out/rpms/`:** `kernel-spx`, `surface-pro-x-firmware` and `surface-pro-x-support`
 - **`out/Fedora-KDE-SurfaceProX-44.raw`:** the bootable disk image
 
-Fedora 45 releases on 20 October 2026. To build on it instead, run `FEDORA_RELEASE=45 sudo -E ./build.sh image` once it's out.
+Fedora 45 was delayed and is now expected on 3 November 2026. To build on it instead, run `FEDORA_RELEASE=45 sudo -E ./build.sh image` once it's out.
 
 If the image step says DNS doesn't work inside the image, check that `getent hosts mirrors.fedoraproject.org` works in the WSL shell itself.
 

@@ -204,6 +204,10 @@ else
     echo "warning: Windows EFI partition not found; use the UEFI boot menu to start Windows" >&2
 fi
 grub2-editenv "$TGT/boot/grub2/grubenv" unset menu_auto_hide 2>/dev/null || true
+# systemd-repart grows the image's root partition to fill the USB drive on
+# first boot. The internal root already fills its free space, and repart
+# fails there on every boot, so turn it off on the installed system.
+ln -sfn /dev/null "$TGT/etc/systemd/system/systemd-repart.service"
 touch "$TGT/.autorelabel"
 
 # ---- UEFI boot entry ----------------------------------------------------

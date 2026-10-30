@@ -1,5 +1,5 @@
 Name:           surface-pro-x-support
-Version:        1.13
+Version:        1.14
 Release:        1
 Summary:        Fedora integration for the Microsoft Surface Pro X
 License:        MIT
@@ -130,6 +130,13 @@ fi
 /usr/share/alsa/ucm2/conf.d/sdm845/sdm845.conf
 
 %changelog
+* Fri Oct 30 2026 Surface Pro X Fedora kit <spx@localhost> - 1.14-1
+- Boot entries: when a kernel is removed, also remove its entries named
+  after the image's temporary machine id (they were left behind and showed
+  up in GRUB without the Surface Pro X kernel arguments)
+- Installer: mask systemd-repart.service on the installed system; it only
+  grows the USB image and failed on every boot from the internal drive
+
 * Sun Oct 25 2026 Surface Pro X Fedora kit <spx@localhost> - 1.13-1
 - Touch: restart iptsd after resume (surface-pro-x-touch-resume.service);
   the touchscreen comes back from sleep in single-touch mode

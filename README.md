@@ -87,7 +87,7 @@ You need a PC running Fedora (Workstation, KDE or any other edition), about 50 G
    - **`out/rpms/`:** `kernel-spx`, `surface-pro-x-firmware` and `surface-pro-x-support`
    - **`out/Fedora-KDE-SurfaceProX-44.raw`:** the bootable disk image
 
-   Fedora 45 releases on 20 October 2026. To build on it instead, run `FEDORA_RELEASE=45 sudo -E ./build.sh image` once it's out.
+   Fedora 45 was delayed and is now expected on 3 November 2026. To build on it instead, run `FEDORA_RELEASE=45 sudo -E ./build.sh image` once it's out.
 
 3. Write the image to the USB drive. Plug it in and find its device name. Look for the disk with the USB drive's size, for example `/dev/sdb`:
 
